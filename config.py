@@ -26,12 +26,24 @@ ALLOWED_CHAT_IDS: list[int] = [
 REPORT_CHAT_ID: int = int(os.environ.get("REPORT_CHAT_ID", "0"))
 
 # ── Storage ────────────────────────────────────────────────────────────────────
+def _resolve_database_url() -> str:
+    """Resolve PostgreSQL URL from common env var names."""
+    for key in (
+        "DATABASE_URL",
+        "DATABASE_PRIVATE_URL",
+        "DATABASE_PUBLIC_URL",
+        "POSTGRES_URL",
+        "POSTGRESQL_URL",
+    ):
+        value = os.environ.get(key)
+        if value:
+            return value
+    return "postgresql://localhost/jizhang"
+
+
 # PostgreSQL connection string.
 # Example: postgresql://postgres@localhost:5432/jizhang
-DATABASE_URL: str = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://localhost/jizhang",
-)
+DATABASE_URL: str = _resolve_database_url()
 
 # ── Timezone ───────────────────────────────────────────────────────────────────
 TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
