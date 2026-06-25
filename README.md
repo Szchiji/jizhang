@@ -13,8 +13,8 @@
 | 加减记账 | 支持通过 `+` / `-`（或“减”）进行金额运算，负数可冲减错误记账 |
 | 多金额候选 | 发现多个候选金额时弹出按钮让用户选择 |
 | 幂等防重复 | 同一条原始消息重复转发只记一次 |
-| 每日报表 | 00:00 推送"昨日入账统计"（总额 + 分人 + 笔数） |
-| 每月报表 | 每月 1 日 00:00 同时推送"上月入账排行" |
+| 每日报表 | 按 `DAILY_REPORT_TIME` 主动推送"当日入账统计"（管理员看全局，普通用户看个人） |
+| 每月报表 | 按 `MONTHLY_REPORT_DAY` + `MONTHLY_REPORT_TIME` 主动推送"当月入账排行" |
 | 今日统计 | 私聊内联按钮可查看"今日入账统计"（总额 + 分人 + 分项目） |
 | 本周统计 | 私聊内联按钮可查看"本周入账统计"（周一至周日） |
 | 日期查账 | 私聊内联按钮输入日期后可查看指定日期统计（支持 `YYYY-MM-DD` 等格式） |
@@ -51,7 +51,10 @@ python bot.py
    | `BOT_TOKEN` * | BotFather 给出的 Bot Token |
    | `ADMIN_IDS` * | 管理员的 Telegram 用户 ID（逗号分隔） |
    | `WEBHOOK_BASE_URL` * | 机器人公网地址（例如 `https://<你的域名>`；Railway 可用 `https://${RAILWAY_PUBLIC_DOMAIN}`） |
-   | `REPORT_CHAT_ID` | 接收每日/每月报表的 chat ID（0=不推送） |
+   | `REPORT_CHAT_ID` | 额外接收每日/每月报表的 chat ID（0=不推送） |
+   | `DAILY_REPORT_TIME` | 每日推送时间（`HH:MM`，默认 `21:00`） |
+   | `MONTHLY_REPORT_TIME` | 每月推送时间（`HH:MM`，默认 `21:00`） |
+   | `MONTHLY_REPORT_DAY` | 每月推送日期（`1-31`，默认 `1`，超出当月天数则按月末） |
    | `ALLOWED_USER_IDS` | 允许使用的用户 ID 白名单（空=不限制） |
    | `ALLOWED_CHAT_IDS` | 允许使用的群组 ID 白名单（空=不限制） |
    | `DATABASE_URL` | PostgreSQL 连接串（如 `postgresql://postgres@host:5432/db`，也会自动识别 `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL`） |
@@ -67,6 +70,9 @@ python bot.py
    ADMIN_IDS=123456789
    WEBHOOK_BASE_URL=https://${RAILWAY_PUBLIC_DOMAIN}
    REPORT_CHAT_ID=0
+   DAILY_REPORT_TIME=21:00
+   MONTHLY_REPORT_TIME=21:00
+   MONTHLY_REPORT_DAY=1
    ALLOWED_USER_IDS=
    ALLOWED_CHAT_IDS=
    DATABASE_URL=postgresql://postgres@localhost:5432/jizhang
@@ -89,7 +95,10 @@ python bot.py
 | `ADMIN_IDS` | 建议 | 空 | `123456789,987654321` | 管理员用户 ID 列表（逗号分隔）。 |
 | `ALLOWED_USER_IDS` | 否 | 空 | `123456789` | 用户白名单；空表示不限制。 |
 | `ALLOWED_CHAT_IDS` | 否 | 空 | `-1001234567890` | 群聊白名单；机器人被有权限用户拉入群后会自动写入该白名单。 |
-| `REPORT_CHAT_ID` | 否 | `0` | `-1001234567890` | 日报/月报推送目标；`0` 表示关闭推送。 |
+| `REPORT_CHAT_ID` | 否 | `0` | `-1001234567890` | 日报/月报额外推送目标；`0` 表示关闭。 |
+| `DAILY_REPORT_TIME` | 否 | `21:00` | `20:30` | 每日主动推送当日统计的时间（`HH:MM`，按 `TZ` 生效）。 |
+| `MONTHLY_REPORT_TIME` | 否 | `21:00` | `20:30` | 每月主动推送当月统计的时间（`HH:MM`，按 `TZ` 生效）。 |
+| `MONTHLY_REPORT_DAY` | 否 | `1` | `28` | 每月主动推送日期（`1-31`，若当月不足该天则自动在月末推送）。 |
 | `DATABASE_URL` | 建议 | 自动回退 | `postgresql://postgres@host:5432/db` | 主数据库连接串；优先级最高。 |
 | `DATABASE_PRIVATE_URL` | 否 | 空 | `postgresql://...` | 当 `DATABASE_URL` 缺失时可作为回退。 |
 | `DATABASE_PUBLIC_URL` | 否 | 空 | `postgresql://...` | 当上面两项缺失时可作为回退。 |

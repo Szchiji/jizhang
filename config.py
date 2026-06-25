@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 # ── Required ───────────────────────────────────────────────────────────────────
@@ -21,9 +22,33 @@ ALLOWED_CHAT_IDS: list[int] = [
     int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if x.strip()
 ]
 
+# ── Timezone ───────────────────────────────────────────────────────────────────
+TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
+
 # ── Reports ────────────────────────────────────────────────────────────────────
 # Chat ID where daily/monthly reports are sent (0 = disabled)
 REPORT_CHAT_ID: int = int(os.environ.get("REPORT_CHAT_ID", "0"))
+
+
+def _parse_report_time(name: str, default: str) -> dt_time:
+    """Parse HH:MM report time config."""
+    raw = os.environ.get(name, default).strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be HH:MM, got: {raw!r}") from exc
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"{name} must be HH:MM, got: {raw!r}")
+    return dt_time(hour, minute, 0, tzinfo=TZ)
+
+
+DAILY_REPORT_TIME: dt_time = _parse_report_time("DAILY_REPORT_TIME", "21:00")
+MONTHLY_REPORT_TIME: dt_time = _parse_report_time("MONTHLY_REPORT_TIME", "21:00")
+MONTHLY_REPORT_DAY: int = int(os.environ.get("MONTHLY_REPORT_DAY", "1"))
+if not (1 <= MONTHLY_REPORT_DAY <= 31):
+    raise ValueError("MONTHLY_REPORT_DAY must be between 1 and 31")
 
 # ── Storage ────────────────────────────────────────────────────────────────────
 def _resolve_database_url() -> str:
@@ -44,9 +69,6 @@ def _resolve_database_url() -> str:
 # PostgreSQL connection string.
 # Example: postgresql://postgres@localhost:5432/jizhang
 DATABASE_URL: str = _resolve_database_url()
-
-# ── Timezone ───────────────────────────────────────────────────────────────────
-TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
 # ── Webhook ─────────────────────────────────────────────────────────────────────
 _default_public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
