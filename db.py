@@ -76,9 +76,37 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS project_aliases (
                 keyword      TEXT    PRIMARY KEY,
                 project_name TEXT    NOT NULL,
+                owner_user_id BIGINT NOT NULL DEFAULT 0,
                 created_by   BIGINT  NOT NULL,
                 created_at   TIMESTAMPTZ NOT NULL
             )
+        """)
+        await conn.execute("""
+            ALTER TABLE project_aliases
+            ADD COLUMN IF NOT EXISTS owner_user_id BIGINT
+        """)
+        await conn.execute(
+            "UPDATE project_aliases SET owner_user_id = 0 WHERE owner_user_id IS NULL"
+        )
+        await conn.execute("""
+            ALTER TABLE project_aliases
+            ALTER COLUMN owner_user_id SET NOT NULL
+        """)
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'project_aliases_pkey'
+                ) THEN
+                    ALTER TABLE project_aliases DROP CONSTRAINT project_aliases_pkey;
+                END IF;
+            END$$
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_aliases_keyword_owner
+            ON project_aliases (keyword, owner_user_id)
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS allowed_users (
@@ -210,19 +238,25 @@ async def list_aliases() -> list[tuple[str, int]]:
     return [(row["keyword"], row["user_id"]) for row in rows]
 
 
-async def set_project_alias(keyword: str, project_name: str, created_by: int) -> None:
+async def set_project_alias(
+    keyword: str,
+    project_name: str,
+    created_by: int,
+    owner_user_id: int = 0,
+) -> None:
     """Upsert a keyword → project_name mapping."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
         await conn.execute(
-            """INSERT INTO project_aliases (keyword, project_name, created_by, created_at)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT(keyword) DO UPDATE
+            """INSERT INTO project_aliases (keyword, project_name, owner_user_id, created_by, created_at)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT(keyword, owner_user_id) DO UPDATE
                SET project_name = EXCLUDED.project_name,
                    created_by = EXCLUDED.created_by,
                    created_at = EXCLUDED.created_at""",
             keyword,
             project_name,
+            owner_user_id,
             created_by,
             datetime.now(config.TZ),
         )
@@ -230,30 +264,52 @@ async def set_project_alias(keyword: str, project_name: str, created_by: int) ->
         await conn.close()
 
 
-async def list_project_aliases() -> list[tuple[str, str]]:
-    """Return all (keyword, project_name) pairs sorted by keyword."""
+async def list_project_aliases(owner_user_id: Optional[int] = None) -> list[tuple[str, str]]:
+    """Return visible (keyword, project_name) pairs sorted by keyword."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
-        rows = await conn.fetch(
-            "SELECT keyword, project_name FROM project_aliases ORDER BY keyword"
-        )
+        if owner_user_id is None:
+            rows = await conn.fetch(
+                "SELECT keyword, project_name FROM project_aliases WHERE owner_user_id = 0 ORDER BY keyword"
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT DISTINCT ON (keyword) keyword, project_name
+                   FROM project_aliases
+                   WHERE owner_user_id IN (0, $1)
+                   ORDER BY keyword, (owner_user_id = $1) DESC""",
+                owner_user_id,
+            )
     finally:
         await conn.close()
     return [(row["keyword"], row["project_name"]) for row in rows]
 
 
-async def resolve_project_by_text(text: str) -> Optional[str]:
+async def resolve_project_by_text(text: str, owner_user_id: Optional[int] = None) -> Optional[str]:
     """Return project from the best-matching keyword found in *text*."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
-        row = await conn.fetchrow(
-            """SELECT project_name
-               FROM project_aliases
-               WHERE $1 ILIKE ('%%' || keyword || '%%')
-               ORDER BY LENGTH(keyword) DESC
-               LIMIT 1""",
-            text,
-        )
+        if owner_user_id is None:
+            row = await conn.fetchrow(
+                """SELECT project_name
+                   FROM project_aliases
+                   WHERE owner_user_id = 0
+                    AND $1 ILIKE ('%%' || keyword || '%%')
+                   ORDER BY LENGTH(keyword) DESC
+                   LIMIT 1""",
+                text,
+            )
+        else:
+            row = await conn.fetchrow(
+                """SELECT project_name
+                   FROM project_aliases
+                   WHERE owner_user_id IN (0, $2)
+                    AND $1 ILIKE ('%%' || keyword || '%%')
+                   ORDER BY (owner_user_id = $2) DESC, LENGTH(keyword) DESC
+                   LIMIT 1""",
+                text,
+                owner_user_id,
+            )
     finally:
         await conn.close()
     return row["project_name"] if row else None
@@ -407,6 +463,37 @@ async def get_monthly_stats_for_user(year: int, month: int, forward_uid: int) ->
                ORDER BY SUM(amount) DESC""",
             year,
             month,
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "projects": projects}
+
+
+async def get_daily_stats_for_user(target_date: date, forward_uid: int) -> dict:
+    """Return daily statistics for a single forwarded user ID."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE date_local = $1
+                 AND forward_uid = $2""",
+            target_date,
+            forward_uid,
+        )
+        count, total = row[0], float(row[1])
+
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local = $1
+                 AND forward_uid = $2
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            target_date,
             forward_uid,
         )
     finally:

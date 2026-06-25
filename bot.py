@@ -31,6 +31,7 @@ import config
 from db import (
     clear_entries_by_forward_uid_and_project,
     clear_entries_by_forward_uid,
+    get_daily_stats_for_user,
     get_alias,
     get_daily_stats,
     get_monthly_stats,
@@ -113,6 +114,10 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
         )
     return InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton("➕ 绑定项目关键词", callback_data="menu:bindproject"),
+                InlineKeyboardButton("📋 查看项目关键词", callback_data="menu:listprojects"),
+            ],
             [
                 InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
                 InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
@@ -326,7 +331,7 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         return
 
     is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
-    if not is_admin:
+    if not is_admin and action not in {"bindproject_keyword", "bindproject_name"}:
         _clear_flow(context)
         await update.message.reply_text("❌ 仅管理员可执行该操作")
         return
@@ -366,12 +371,13 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
 
     if action == "bindproject_name":
         keyword = context.user_data.get("flow_keyword", "").strip()
-        await set_project_alias(keyword, raw, update.effective_user.id)
+        owner_user_id = 0 if is_admin else update.effective_user.id
+        await set_project_alias(keyword, raw, update.effective_user.id, owner_user_id=owner_user_id)
         _clear_flow(context)
         await update.message.reply_text(
             f"✅ 已绑定项目关键词：<code>{keyword}</code> → <code>{raw}</code>",
             parse_mode=ParseMode.HTML,
-            reply_markup=_main_menu_keyboard(True),
+            reply_markup=_main_menu_keyboard(is_admin),
         )
         return
 
@@ -477,6 +483,9 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     message = update.message
     text = message.text or message.caption or ""
     amounts = extract_amounts(text)
+    current_user = update.effective_user
+    current_uid = current_user.id if current_user else None
+    is_admin = bool(current_uid and _is_admin(current_uid))
 
     if not amounts:
         await message.reply_text("⚠️ 未识别到有效金额，请检查消息内容")
@@ -484,14 +493,20 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     src_hash = _source_hash(message)
     fwd_uid, fwd_name = _forward_identity(message)
-    project_name = (
-        extract_project_name(text)
-        or await resolve_project_by_text(text)
-        or config.DEFAULT_PROJECT_NAME
-    )
+    project_name = extract_project_name(text)
+    if not project_name:
+        project_name = await resolve_project_by_text(
+            text,
+            owner_user_id=None if is_admin else current_uid,
+        )
+    if not project_name:
+        project_name = config.DEFAULT_PROJECT_NAME
 
     # Alias look-up: if we have a name but no UID, try the alias table
-    if fwd_uid is None and fwd_name:
+    if not is_admin and current_uid:
+        fwd_uid = current_uid
+        fwd_name = current_user.full_name or current_user.username or str(current_uid)
+    elif fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name)
 
     if len(amounts) > 1 and ("+" in text or "＋" in text):
@@ -555,9 +570,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "stats":
             _clear_flow(context)
             now = datetime.now(config.TZ)
-            stats = await get_monthly_stats(now.year, now.month)
+            if is_admin:
+                stats = await get_monthly_stats(now.year, now.month)
+                text = _fmt_monthly(now.year, now.month, stats)
+            else:
+                stats = await get_monthly_stats_for_user(now.year, now.month, update.effective_user.id)
+                text = _fmt_monthly_user(now.year, now.month, update.effective_user.id, stats)
             await query.edit_message_text(
-                _fmt_monthly(now.year, now.month, stats),
+                text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=_main_menu_keyboard(is_admin),
             )
@@ -566,20 +586,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "todaystats":
             _clear_flow(context)
             now = datetime.now(config.TZ)
-            stats = await get_daily_stats(now.date())
+            if is_admin:
+                stats = await get_daily_stats(now.date())
+                text = _fmt_daily(now.date(), stats)
+            else:
+                stats = await get_daily_stats_for_user(now.date(), update.effective_user.id)
+                text = _fmt_daily_user(now.date(), update.effective_user.id, stats)
             await query.edit_message_text(
-                _fmt_daily(now.date(), stats),
+                text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=_main_menu_keyboard(is_admin),
             )
             return
 
         if (
-            not is_admin
-            or not update.effective_chat
+            not update.effective_chat
             or update.effective_chat.type != "private"
+            or (not is_admin and action not in {"listprojects", "bindproject"})
         ):
-            await query.edit_message_text("❌ 仅管理员可在私聊中执行该操作")
+            await query.edit_message_text("❌ 当前操作仅管理员可在私聊中执行")
             return
 
         if action == "listaliases":
@@ -601,7 +626,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "listprojects":
             _clear_flow(context)
-            projects = await list_project_aliases()
+            projects = await list_project_aliases(
+                owner_user_id=None if is_admin else update.effective_user.id
+            )
             text = (
                 "暂无项目关键词配置"
                 if not projects
@@ -612,7 +639,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=_main_menu_keyboard(True),
+                reply_markup=_main_menu_keyboard(is_admin),
             )
             return
 
@@ -667,7 +694,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("请输入要查询统计的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
             return
 
-        await query.edit_message_text("❌ 无效操作", reply_markup=_main_menu_keyboard(True))
+        await query.edit_message_text("❌ 无效操作", reply_markup=_main_menu_keyboard(is_admin))
         return
 
     if query.data == "amt:cancel":
@@ -801,6 +828,22 @@ def _fmt_monthly_user(year: int, month: int, forward_uid: int, stats: dict) -> s
     if stats.get("projects"):
         for i, (project, total, cnt) in enumerate(stats["projects"], 1):
             lines.append(f"  {i}. {project}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    return "\n".join(lines)
+
+
+def _fmt_daily_user(d: object, forward_uid: int, stats: dict) -> str:
+    lines = [
+        f"📊 <b>{d} 用户 {forward_uid} 入账统计</b>",
+        f"💰 总额：¥{stats['total']:,.2f}",
+        f"📝 笔数：{stats['count']} 笔",
+        "",
+        "📁 分项目明细：",
+    ]
+    if stats.get("projects"):
+        for name, total, cnt in stats["projects"]:
+            lines.append(f"  • {name}：¥{total:,.2f}（{cnt} 笔）")
     else:
         lines.append("  （无数据）")
     return "\n".join(lines)
