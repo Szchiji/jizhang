@@ -32,6 +32,7 @@ import config
 from db import (
     clear_entries_by_forward_uid_and_project,
     clear_entries_by_forward_uid,
+    list_allowed_chats,
     get_daily_stats_for_user,
     get_alias,
     get_alias_keyword_for_user,
@@ -48,10 +49,12 @@ from db import (
     list_project_aliases,
     remove_alias,
     remove_allowed_user,
+    remove_allowed_chat,
     remove_project_alias,
     resolve_project_by_text,
     set_alias,
     set_project_alias,
+    upsert_allowed_chat,
     upsert_allowed_user,
 )
 from parser import extract_amounts, extract_project_name
@@ -62,6 +65,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
+runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -74,16 +78,60 @@ def _is_allowed(update: Update) -> bool:
     """Return True when the user/chat is permitted to use the bot."""
     uid = update.effective_user.id if update.effective_user else None
     cid = update.effective_chat.id if update.effective_chat else None
+    ctype = update.effective_chat.type if update.effective_chat else None
 
     if uid and _is_admin(uid):
         return True
 
+    if ctype in {"group", "supergroup"}:
+        if cid in runtime_allowed_chat_ids:
+            return True
+        if uid in runtime_allowed_user_ids:
+            return True
+        return False
+
     if runtime_allowed_user_ids and uid not in runtime_allowed_user_ids:
         return False
-    if config.ALLOWED_CHAT_IDS and cid not in config.ALLOWED_CHAT_IDS:
+    if runtime_allowed_chat_ids and cid not in runtime_allowed_chat_ids:
         return False
 
     return True
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_member_update = update.my_chat_member
+    if not chat_member_update:
+        return
+
+    chat = chat_member_update.chat
+    if chat.type not in {"group", "supergroup"}:
+        return
+
+    chat_id = chat.id
+    actor_id = update.effective_user.id if update.effective_user else 0
+    new_status = getattr(chat_member_update.new_chat_member, "status", "")
+    old_status = getattr(chat_member_update.old_chat_member, "status", "")
+
+    active_statuses = {"member", "administrator"}
+    removed_statuses = {"left", "kicked"}
+
+    if new_status in active_statuses and old_status != new_status:
+        if _is_admin(actor_id) or actor_id in runtime_allowed_user_ids:
+            await upsert_allowed_chat(chat_id, actor_id)
+            runtime_allowed_chat_ids.add(chat_id)
+            logger.info("Allowed group chat %s by user %s", chat_id, actor_id)
+        else:
+            logger.info(
+                "Ignored group chat %s add by unauthorized user %s",
+                chat_id,
+                actor_id,
+            )
+        return
+
+    if new_status in removed_statuses and chat_id in runtime_allowed_chat_ids:
+        await remove_allowed_chat(chat_id)
+        runtime_allowed_chat_ids.discard(chat_id)
+        logger.info("Removed allowed group chat %s after bot left", chat_id)
 
 
 def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
@@ -1236,10 +1284,12 @@ async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _post_init(application: Application) -> None:
-    global runtime_allowed_user_ids
+    global runtime_allowed_user_ids, runtime_allowed_chat_ids
     await init_db()
     runtime_allowed_user_ids = set(config.ALLOWED_USER_IDS)
     runtime_allowed_user_ids.update(await list_allowed_users())
+    runtime_allowed_chat_ids = set(config.ALLOWED_CHAT_IDS)
+    runtime_allowed_chat_ids.update(await list_allowed_chats())
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1288,6 +1338,7 @@ def main() -> None:
             handle_private_text_input,
         )
     )
+    app.add_handler(MessageHandler(filters.StatusUpdate.MY_CHAT_MEMBER, handle_my_chat_member))
 
     # Inline-keyboard callbacks
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))

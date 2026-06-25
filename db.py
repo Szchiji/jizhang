@@ -143,6 +143,13 @@ async def init_db() -> None:
                 created_at TIMESTAMPTZ NOT NULL
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_chats (
+                chat_id    BIGINT PRIMARY KEY,
+                created_by BIGINT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+        """)
     finally:
         await conn.close()
     logger.info("Database ready at %s", config.DATABASE_URL)
@@ -490,6 +497,49 @@ async def list_allowed_users() -> list[int]:
     finally:
         await conn.close()
     return [int(row["user_id"]) for row in rows]
+
+
+async def upsert_allowed_chat(chat_id: int, created_by: int) -> None:
+    """Add/update an allowed group chat."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO allowed_chats (chat_id, created_by, created_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(chat_id) DO UPDATE
+               SET created_by = EXCLUDED.created_by,
+                   created_at = EXCLUDED.created_at""",
+            chat_id,
+            created_by,
+            datetime.now(config.TZ),
+        )
+    finally:
+        await conn.close()
+
+
+async def remove_allowed_chat(chat_id: int) -> bool:
+    """Remove an allowed group chat. Returns True when deleted."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM allowed_chats WHERE chat_id = $1",
+            chat_id,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1]) > 0
+
+
+async def list_allowed_chats() -> list[int]:
+    """Return all allowed group chat IDs sorted ascending."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT chat_id FROM allowed_chats ORDER BY chat_id"
+        )
+    finally:
+        await conn.close()
+    return [int(row["chat_id"]) for row in rows]
 
 
 # ── Statistics ─────────────────────────────────────────────────────────────────
