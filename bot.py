@@ -5,13 +5,11 @@ Run with:
 """
 from __future__ import annotations
 
-import hashlib
 import logging
-import time
+import hashlib
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
-import asyncpg
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -56,10 +54,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
-
-
-class PollingLockNotAcquired(RuntimeError):
-    """Raised when another replica already owns the polling advisory lock."""
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -830,102 +824,72 @@ async def _post_init(application: Application) -> None:
     await init_db()
     runtime_allowed_user_ids = set(config.ALLOWED_USER_IDS)
     runtime_allowed_user_ids.update(await list_allowed_users())
-    lock_conn = await asyncpg.connect(config.DATABASE_URL)
-    locked = await lock_conn.fetchval(
-        "SELECT pg_try_advisory_lock($1)",
-        config.POLLING_LOCK_ID,
-    )
-    if not locked:
-        await lock_conn.close()
-        raise PollingLockNotAcquired(
-            "another bot instance already holds the polling lock; "
-            "stop duplicate replicas or set a different POLLING_LOCK_ID"
-        )
-    application.bot_data["_polling_lock_conn"] = lock_conn
-    logger.info("Acquired polling lock %s", config.POLLING_LOCK_ID)
-
-
-async def _post_shutdown(application: Application) -> None:
-    lock_conn = application.bot_data.pop("_polling_lock_conn", None)
-    if lock_conn:
-        try:
-            await lock_conn.execute(
-                "SELECT pg_advisory_unlock($1)",
-                config.POLLING_LOCK_ID,
-            )
-        finally:
-            await lock_conn.close()
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
         logger.warning(
-            "Telegram polling conflict detected during restart overlap; retrying."
+            "Telegram conflict detected; webhook registration may be overlapping during restart."
         )
         return
     logger.exception("Unhandled Telegram error", exc_info=context.error)
 
 
 def main() -> None:
-    retry_seconds = 30
-    while True:
-        app = (
-            Application.builder()
-            .token(config.BOT_TOKEN)
-            .post_init(_post_init)
-            .post_shutdown(_post_shutdown)
-            .build()
+    if not config.WEBHOOK_URL:
+        raise RuntimeError(
+            "WEBHOOK_BASE_URL is required for webhook mode "
+            "(or set RAILWAY_PUBLIC_DOMAIN on Railway)."
         )
 
-        # Commands
-        app.add_handler(CommandHandler("start", cmd_start))
-        app.add_handler(CommandHandler("bindid", cmd_bindid))
-        app.add_handler(CommandHandler("listaliases", cmd_listaliases))
-        app.add_handler(CommandHandler("bindproject", cmd_bindproject))
-        app.add_handler(CommandHandler("listprojects", cmd_listprojects))
-        app.add_handler(CommandHandler("clearuser", cmd_clearuser))
-        app.add_handler(CommandHandler("clearuserproject", cmd_clearuserproject))
-        app.add_handler(CommandHandler("stats", cmd_stats))
+    app = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .post_init(_post_init)
+        .build()
+    )
 
-        # Forward message handler (text or caption)
-        app.add_handler(
-            MessageHandler(
-                filters.FORWARDED & (filters.TEXT | filters.CAPTION),
-                handle_forward,
-            )
+    # Commands
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("bindid", cmd_bindid))
+    app.add_handler(CommandHandler("listaliases", cmd_listaliases))
+    app.add_handler(CommandHandler("bindproject", cmd_bindproject))
+    app.add_handler(CommandHandler("listprojects", cmd_listprojects))
+    app.add_handler(CommandHandler("clearuser", cmd_clearuser))
+    app.add_handler(CommandHandler("clearuserproject", cmd_clearuserproject))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+
+    # Forward message handler (text or caption)
+    app.add_handler(
+        MessageHandler(
+            filters.FORWARDED & (filters.TEXT | filters.CAPTION),
+            handle_forward,
         )
-        app.add_handler(
-            MessageHandler(
-                filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
-                handle_private_text_input,
-            )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
+            handle_private_text_input,
         )
+    )
 
-        # Inline-keyboard callbacks
-        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))
-        app.add_error_handler(_on_error)
+    # Inline-keyboard callbacks
+    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))
+    app.add_error_handler(_on_error)
 
-        # Daily report at 00:00 local time
-        midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
-        app.job_queue.run_daily(_job_daily, time=midnight)
+    # Daily report at 00:00 local time
+    midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
+    app.job_queue.run_daily(_job_daily, time=midnight)
 
-        logger.info("Bot starting (polling)…")
-        try:
-            app.run_polling(drop_pending_updates=True)
-            return
-        except PollingLockNotAcquired:
-            logger.warning(
-                "Polling lock unavailable; another replica is active. Retrying in %s seconds.",
-                retry_seconds,
-            )
-            time.sleep(retry_seconds)
-        except Conflict:
-            logger.exception(
-                "Telegram polling conflict: only one bot instance can call getUpdates. "
-                "Retrying in %s seconds.",
-                retry_seconds,
-            )
-            time.sleep(retry_seconds)
+    logger.info("Bot starting (webhook)…")
+    app.run_webhook(
+        listen=config.WEBHOOK_LISTEN,
+        port=config.WEBHOOK_PORT,
+        url_path=config.WEBHOOK_PATH,
+        webhook_url=config.WEBHOOK_URL,
+        secret_token=config.WEBHOOK_SECRET_TOKEN or None,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":

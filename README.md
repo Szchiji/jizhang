@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 # 2. 配置环境变量（复制示例后编辑）
 cp .env.example .env
-# 编辑 .env，至少填写 BOT_TOKEN 和 ADMIN_IDS
+# 编辑 .env，至少填写 BOT_TOKEN、ADMIN_IDS、WEBHOOK_BASE_URL
 
 # 3. 加载环境变量并启动
 export $(grep -v '^#' .env | xargs)
@@ -46,18 +46,62 @@ python bot.py
    |------|------|
    | `BOT_TOKEN` * | BotFather 给出的 Bot Token |
    | `ADMIN_IDS` * | 管理员的 Telegram 用户 ID（逗号分隔） |
+   | `WEBHOOK_BASE_URL` * | 机器人公网地址（例如 `https://<你的域名>`；Railway 可用 `https://${RAILWAY_PUBLIC_DOMAIN}`） |
    | `REPORT_CHAT_ID` | 接收每日/每月报表的 chat ID（0=不推送） |
    | `ALLOWED_USER_IDS` | 允许使用的用户 ID 白名单（空=不限制） |
    | `ALLOWED_CHAT_IDS` | 允许使用的群组 ID 白名单（空=不限制） |
    | `DATABASE_URL` | PostgreSQL 连接串（如 `postgresql://postgres@host:5432/db`，也会自动识别 `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL`） |
    | `TZ` | 时区（默认 `Asia/Shanghai`） |
-   | `POLLING_LOCK_ID` | 轮询单实例锁 ID（默认 `20260625`，多副本需保持一致） |
+   | `WEBHOOK_PATH` | Webhook 路径（默认 `/telegram/webhook`） |
+   | `WEBHOOK_SECRET_TOKEN` | Telegram webhook 请求校验密钥（建议设置） |
    | `DEFAULT_PROJECT_NAME` | 未识别到项目时使用的默认项目名（默认 `默认项目`） |
+
+   可直接复制到 Railway Variables 的清单（按当前项目环境）：
+
+   ```env
+   BOT_TOKEN=替换为你的TelegramBotToken
+   ADMIN_IDS=123456789
+   WEBHOOK_BASE_URL=https://${RAILWAY_PUBLIC_DOMAIN}
+   REPORT_CHAT_ID=0
+   ALLOWED_USER_IDS=
+   ALLOWED_CHAT_IDS=
+   DATABASE_URL=postgresql://postgres@localhost:5432/jizhang
+   TZ=Asia/Shanghai
+   WEBHOOK_PATH=/telegram/webhook
+   WEBHOOK_SECRET_TOKEN=替换为随机长字符串
+   DEFAULT_PROJECT_NAME=默认项目
+   ```
 
 3. 在 Railway 中为项目绑定 PostgreSQL 服务，并确保 `DATABASE_URL` 已注入。
 
-4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 worker。  
-   若误开了多个副本，机器人会通过 PostgreSQL advisory lock 只允许一个实例进入轮询。
+4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 web 进程。  
+   启动后机器人会自动注册 webhook，无需轮询模式。
+
+### 环境变量详解（按当前代码）
+
+| 变量 | 是否必填 | 默认值 | 示例 | 说明 |
+|------|----------|--------|------|------|
+| `BOT_TOKEN` | 是 | 无 | `123456:ABC...` | Telegram 机器人令牌，缺失会直接启动失败。 |
+| `ADMIN_IDS` | 建议 | 空 | `123456789,987654321` | 管理员用户 ID 列表（逗号分隔）。 |
+| `ALLOWED_USER_IDS` | 否 | 空 | `123456789` | 用户白名单；空表示不限制。 |
+| `ALLOWED_CHAT_IDS` | 否 | 空 | `-1001234567890` | 群聊白名单；空表示不限制。 |
+| `REPORT_CHAT_ID` | 否 | `0` | `-1001234567890` | 日报/月报推送目标；`0` 表示关闭推送。 |
+| `DATABASE_URL` | 建议 | 自动回退 | `postgresql://postgres@host:5432/db` | 主数据库连接串；优先级最高。 |
+| `DATABASE_PRIVATE_URL` | 否 | 空 | `postgresql://...` | 当 `DATABASE_URL` 缺失时可作为回退。 |
+| `DATABASE_PUBLIC_URL` | 否 | 空 | `postgresql://...` | 当上面两项缺失时可作为回退。 |
+| `POSTGRES_URL` | 否 | 空 | `postgresql://...` | 兼容旧变量名，继续回退。 |
+| `POSTGRESQL_URL` | 否 | 空 | `postgresql://...` | 最后一个数据库变量回退项。 |
+| `TZ` | 否 | `Asia/Shanghai` | `Asia/Shanghai` | 时区配置（影响日期统计与定时任务）。 |
+| `RAILWAY_PUBLIC_DOMAIN` | 否 | 空 | `xxx.up.railway.app` | Railway 自动注入；用于推导默认 `WEBHOOK_BASE_URL`。 |
+| `WEBHOOK_BASE_URL` | 是（生产） | 若有域名则自动推导，否则空 | `https://xxx.up.railway.app` | Webhook 公网基地址；生产环境建议显式设置。 |
+| `WEBHOOK_PATH` | 否 | `/telegram/webhook` | `/telegram/webhook` | Webhook 路径；若未以 `/` 开头会自动补齐。 |
+| `WEBHOOK_SECRET_TOKEN` | 否（建议） | 空 | `a-long-random-token` | Telegram webhook 请求校验密钥。 |
+| `WEBHOOK_LISTEN` | 否 | `0.0.0.0` | `0.0.0.0` | Web 服务器监听地址。 |
+| `PORT` | 否 | `8080`（优先于 `WEBHOOK_PORT`） | `8080` | Railway 通常自动注入；作为 webhook 服务端口。 |
+| `WEBHOOK_PORT` | 否 | `8080`（仅当 `PORT` 缺失时生效） | `8080` | 本地或自托管时可手动指定端口。 |
+| `DEFAULT_PROJECT_NAME` | 否 | `默认项目` | `默认项目` | 无法识别项目时写入的项目名。 |
+
+> 数据库连接串最终解析顺序：`DATABASE_URL` → `DATABASE_PRIVATE_URL` → `DATABASE_PUBLIC_URL` → `POSTGRES_URL` → `POSTGRESQL_URL` → `postgresql://localhost/jizhang`。
 
 ---
 
@@ -111,7 +155,7 @@ jizhang/
 ├── db.py            # 异步 PostgreSQL 数据库层（asyncpg）
 ├── parser.py        # 金额提取与噪声过滤
 ├── requirements.txt
-├── Procfile         # Railway worker 进程定义
+├── Procfile         # Railway web 进程定义
 ├── railway.json     # Railway 部署配置
 └── .env.example     # 环境变量示例
 ```
