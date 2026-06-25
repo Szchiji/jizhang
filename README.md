@@ -56,6 +56,22 @@ python bot.py
    | `WEBHOOK_SECRET_TOKEN` | Telegram webhook 请求校验密钥（建议设置） |
    | `DEFAULT_PROJECT_NAME` | 未识别到项目时使用的默认项目名（默认 `默认项目`） |
 
+   可直接复制到 Railway Variables 的清单（按当前项目环境）：
+
+   ```env
+   BOT_TOKEN=替换为你的TelegramBotToken
+   ADMIN_IDS=123456789
+   WEBHOOK_BASE_URL=https://${RAILWAY_PUBLIC_DOMAIN}
+   REPORT_CHAT_ID=0
+   ALLOWED_USER_IDS=
+   ALLOWED_CHAT_IDS=
+   DATABASE_URL=postgresql://postgres@localhost:5432/jizhang
+   TZ=Asia/Shanghai
+   WEBHOOK_PATH=/telegram/webhook
+   WEBHOOK_SECRET_TOKEN=替换为随机长字符串
+   DEFAULT_PROJECT_NAME=默认项目
+   ```
+
 3. 在 Railway 中为项目绑定 PostgreSQL 服务，并确保 `DATABASE_URL` 已注入。
 
 4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 web 进程。  
