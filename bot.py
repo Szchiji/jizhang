@@ -22,6 +22,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -1332,7 +1333,7 @@ def main() -> None:
             handle_private_text_input,
         )
     )
-    app.add_handler(MessageHandler(filters.StatusUpdate.MY_CHAT_MEMBER, handle_my_chat_member))
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Inline-keyboard callbacks
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))
