@@ -48,9 +48,19 @@ DATABASE_URL: str = _resolve_database_url()
 # ── Timezone ───────────────────────────────────────────────────────────────────
 TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
-# ── Polling singleton lock ──────────────────────────────────────────────────────
-# Prevent multiple bot replicas from polling Telegram updates at the same time.
-POLLING_LOCK_ID: int = int(os.environ.get("POLLING_LOCK_ID", "20260625"))
+# ── Webhook ─────────────────────────────────────────────────────────────────────
+_default_public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+_default_webhook_base = (
+    f"https://{_default_public_domain}" if _default_public_domain else ""
+)
+WEBHOOK_BASE_URL: str = os.environ.get("WEBHOOK_BASE_URL", _default_webhook_base).rstrip("/")
+WEBHOOK_PATH: str = os.environ.get("WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = f"/{WEBHOOK_PATH}"
+WEBHOOK_URL: str = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}" if WEBHOOK_BASE_URL else ""
+WEBHOOK_LISTEN: str = os.environ.get("WEBHOOK_LISTEN", "0.0.0.0")
+WEBHOOK_PORT: int = int(os.environ.get("PORT", os.environ.get("WEBHOOK_PORT", "8080")))
+WEBHOOK_SECRET_TOKEN: str = os.environ.get("WEBHOOK_SECRET_TOKEN", "").strip()
 
 # ── Bookkeeping project dimension ────────────────────────────────────────────────
 # Fallback project name when no explicit project can be parsed from message text.
