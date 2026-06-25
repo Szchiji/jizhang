@@ -26,9 +26,12 @@ ALLOWED_CHAT_IDS: list[int] = [
 REPORT_CHAT_ID: int = int(os.environ.get("REPORT_CHAT_ID", "0"))
 
 # ── Storage ────────────────────────────────────────────────────────────────────
-# Path for the SQLite database file.
-# On Railway, mount a volume at /data and leave this default.
-DATABASE_PATH: str = os.environ.get("DATABASE_PATH", "jizhang.db")
+# PostgreSQL connection string.
+# Example: postgresql://postgres@localhost:5432/jizhang
+DATABASE_URL: str = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://localhost/jizhang",
+)
 
 # ── Timezone ───────────────────────────────────────────────────────────────────
 TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
