@@ -39,11 +39,14 @@ from db import (
     get_monthly_stats_for_user,
     init_db,
     insert_entry,
+    list_allowed_users,
     list_aliases,
     list_project_aliases,
+    remove_allowed_user,
     resolve_project_by_text,
     set_alias,
     set_project_alias,
+    upsert_allowed_user,
 )
 from parser import extract_amounts, extract_project_name
 
@@ -52,6 +55,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
 
 
 class PollingLockNotAcquired(RuntimeError):
@@ -72,12 +76,30 @@ def _is_allowed(update: Update) -> bool:
     if uid and _is_admin(uid):
         return True
 
-    if config.ALLOWED_USER_IDS and uid not in config.ALLOWED_USER_IDS:
+    if runtime_allowed_user_ids and uid not in runtime_allowed_user_ids:
         return False
     if config.ALLOWED_CHAT_IDS and cid not in config.ALLOWED_CHAT_IDS:
         return False
 
     return True
+
+
+def _permission_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ 添加可用用户", callback_data="perm:add")],
+            [InlineKeyboardButton("➖ 删除可用用户", callback_data="perm:remove")],
+            [InlineKeyboardButton("📋 查看用户列表", callback_data="perm:list")],
+            [InlineKeyboardButton("❌ 取消操作", callback_data="perm:cancel")],
+        ]
+    )
+
+
+def _fmt_allowed_user_ids() -> str:
+    if not runtime_allowed_user_ids:
+        return "（未配置，当前不限制用户白名单）"
+    ids = sorted(runtime_allowed_user_ids)
+    return "\n".join(f"• <code>{uid}</code>" for uid in ids)
 
 
 # ── Forward-message helpers ────────────────────────────────────────────────────
@@ -171,7 +193,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    await update.message.reply_text(
+    text = (
         "👋 <b>记账机器人</b>\n\n"
         "📌 使用方法：把消息 <b>转发</b> 给我，我会自动识别金额并记账。\n\n"
         "📋 <b>管理命令（仅管理员）：</b>\n"
@@ -181,9 +203,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/listprojects — 查看所有项目关键词\n"
         "/clearuser &lt;用户ID&gt; — 清空该用户所有记账\n"
         "/clearuserproject &lt;用户ID&gt; &lt;项目名&gt; — 清空该用户在项目下的记账\n"
-        "/stats [用户ID] — 查看当月统计（可按用户）",
-        parse_mode=ParseMode.HTML,
+        "/stats [用户ID] — 查看当月统计（可按用户）"
     )
+    message = update.message
+    if (
+        update.effective_chat
+        and update.effective_chat.type == "private"
+        and update.effective_user
+        and _is_admin(update.effective_user.id)
+    ):
+        text += "\n\n🔐 管理员可直接使用下方按钮管理可用用户权限。"
+        await message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_permission_keyboard(),
+        )
+        return
+    await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_bindid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -365,6 +401,53 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+async def handle_private_permission_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("❌ 无权限访问")
+        return
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return
+
+    action = context.user_data.get("permission_action")
+    if action not in {"add", "remove"}:
+        return
+
+    raw = (update.message.text or "").strip()
+    if not raw:
+        await update.message.reply_text("❌ 请输入用户ID")
+        return
+    try:
+        target_uid = int(raw)
+    except ValueError:
+        await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+        return
+
+    context.user_data.pop("permission_action", None)
+    if action == "add":
+        await upsert_allowed_user(target_uid, update.effective_user.id)
+        runtime_allowed_user_ids.add(target_uid)
+        await update.message.reply_text(
+            f"✅ 已添加可用用户：<code>{target_uid}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        removed = await remove_allowed_user(target_uid)
+        runtime_allowed_user_ids.discard(target_uid)
+        if removed:
+            msg = f"✅ 已删除可用用户：<code>{target_uid}</code>"
+        else:
+            msg = f"ℹ️ 用户 <code>{target_uid}</code> 不在可用列表中，已保持现状"
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+    await update.message.reply_text(
+        "📋 <b>当前可用用户列表</b>\n" + _fmt_allowed_user_ids(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_permission_keyboard(),
+    )
+
+
 # ── Forward handler ────────────────────────────────────────────────────────────
 
 
@@ -434,6 +517,46 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not _is_allowed(update):
+        await query.edit_message_text("❌ 无权限访问")
+        return
+
+    if query.data.startswith("perm:"):
+        if (
+            not update.effective_user
+            or not _is_admin(update.effective_user.id)
+            or not update.effective_chat
+            or update.effective_chat.type != "private"
+        ):
+            await query.edit_message_text("❌ 仅管理员可在私聊中管理用户权限")
+            return
+
+        action = query.data.split(":", 1)[1]
+        if action == "add":
+            context.user_data["permission_action"] = "add"
+            await query.edit_message_text("请发送要添加的用户ID（整数）")
+            return
+        if action == "remove":
+            context.user_data["permission_action"] = "remove"
+            await query.edit_message_text("请发送要删除的用户ID（整数）")
+            return
+        if action == "list":
+            context.user_data.pop("permission_action", None)
+            await query.edit_message_text(
+                "📋 <b>当前可用用户列表</b>\n" + _fmt_allowed_user_ids(),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_permission_keyboard(),
+            )
+            return
+        if action == "cancel":
+            context.user_data.pop("permission_action", None)
+            await query.edit_message_text(
+                "✅ 已取消操作。可继续使用下方按钮管理权限。",
+                reply_markup=_permission_keyboard(),
+            )
+            return
+        await query.edit_message_text("❌ 无效操作")
+        return
 
     if query.data == "amt:cancel":
         context.user_data.pop("pending", None)
@@ -602,7 +725,10 @@ async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _post_init(application: Application) -> None:
+    global runtime_allowed_user_ids
     await init_db()
+    runtime_allowed_user_ids = set(config.ALLOWED_USER_IDS)
+    runtime_allowed_user_ids.update(await list_allowed_users())
     lock_conn = await asyncpg.connect(config.DATABASE_URL)
     locked = await lock_conn.fetchval(
         "SELECT pg_try_advisory_lock($1)",
@@ -667,9 +793,15 @@ def main() -> None:
                 handle_forward,
             )
         )
+        app.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
+                handle_private_permission_input,
+            )
+        )
 
-        # Inline-keyboard callback for amount selection
-        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
+        # Inline-keyboard callbacks
+        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|perm):"))
         app.add_error_handler(_on_error)
 
         # Daily report at 00:00 local time
