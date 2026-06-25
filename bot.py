@@ -8,7 +8,8 @@ from __future__ import annotations
 import logging
 import hashlib
 import html
-from datetime import date, datetime, timedelta, time as dt_time
+import calendar
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from telegram import (
@@ -1258,27 +1259,55 @@ def _fmt_daily_user(d: object, forward_uid: int, stats: dict) -> str:
 
 
 async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send yesterday's summary; also send last-month summary on the 1st."""
-    if not config.REPORT_CHAT_ID:
-        return
+    """Send today's report to admins and allowed users."""
     now = datetime.now(config.TZ)
-    yesterday = (now - timedelta(days=1)).date()
-    stats = await get_daily_stats(yesterday)
-    await context.bot.send_message(
-        chat_id=config.REPORT_CHAT_ID,
-        text=_fmt_daily(yesterday, stats),
-        parse_mode=ParseMode.HTML,
-    )
+    today = now.date()
+    global_daily = await get_daily_stats(today)
+    recipient_ids = set(config.ADMIN_IDS) | set(runtime_allowed_user_ids)
+    if config.REPORT_CHAT_ID:
+        recipient_ids.add(config.REPORT_CHAT_ID)
+    for chat_id in recipient_ids:
+        try:
+            if _is_admin(chat_id) or chat_id == config.REPORT_CHAT_ID:
+                text = _fmt_daily(today, global_daily)
+            else:
+                user_daily = await get_daily_stats_for_user(today, chat_id)
+                text = _fmt_daily_user(today, chat_id, user_daily)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logger.warning("Failed to send daily report to %s", chat_id, exc_info=True)
 
-    # Monthly report on the 1st of each month
-    if now.day == 1:
-        last = (now.replace(day=1) - timedelta(days=1))
-        mstats = await get_monthly_stats(last.year, last.month)
-        await context.bot.send_message(
-            chat_id=config.REPORT_CHAT_ID,
-            text=_fmt_monthly(last.year, last.month, mstats),
-            parse_mode=ParseMode.HTML,
-        )
+
+async def _job_monthly(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send current-month report on the configured day."""
+    now = datetime.now(config.TZ)
+    month_last_day = calendar.monthrange(now.year, now.month)[1]
+    target_day = min(config.MONTHLY_REPORT_DAY, month_last_day)
+    if now.day != target_day:
+        return
+
+    global_monthly = await get_monthly_stats(now.year, now.month)
+    recipient_ids = set(config.ADMIN_IDS) | set(runtime_allowed_user_ids)
+    if config.REPORT_CHAT_ID:
+        recipient_ids.add(config.REPORT_CHAT_ID)
+    for chat_id in recipient_ids:
+        try:
+            if _is_admin(chat_id) or chat_id == config.REPORT_CHAT_ID:
+                text = _fmt_monthly(now.year, now.month, global_monthly)
+            else:
+                user_monthly = await get_monthly_stats_for_user(now.year, now.month, chat_id)
+                text = _fmt_monthly_user(now.year, now.month, chat_id, user_monthly)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logger.warning("Failed to send monthly report to %s", chat_id, exc_info=True)
 
 
 # ── Application setup ──────────────────────────────────────────────────────────
@@ -1339,9 +1368,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))
     app.add_error_handler(_on_error)
 
-    # Daily report at 00:00 local time
-    midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
-    app.job_queue.run_daily(_job_daily, time=midnight)
+    app.job_queue.run_daily(_job_daily, time=config.DAILY_REPORT_TIME)
+    app.job_queue.run_daily(_job_monthly, time=config.MONTHLY_REPORT_TIME)
 
     if config.WEBHOOK_URL:
         logger.info("Bot starting (webhook)…")
