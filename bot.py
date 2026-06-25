@@ -1302,12 +1302,6 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    if not config.WEBHOOK_URL:
-        raise RuntimeError(
-            "WEBHOOK_BASE_URL is required for webhook mode "
-            "(or set RAILWAY_PUBLIC_DOMAIN on Railway)."
-        )
-
     app = (
         Application.builder()
         .token(config.BOT_TOKEN)
@@ -1348,15 +1342,22 @@ def main() -> None:
     midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
     app.job_queue.run_daily(_job_daily, time=midnight)
 
-    logger.info("Bot starting (webhook)…")
-    app.run_webhook(
-        listen=config.WEBHOOK_LISTEN,
-        port=config.WEBHOOK_PORT,
-        url_path=config.WEBHOOK_PATH,
-        webhook_url=config.WEBHOOK_URL,
-        secret_token=config.WEBHOOK_SECRET_TOKEN or None,
-        drop_pending_updates=True,
-    )
+    if config.WEBHOOK_URL:
+        logger.info("Bot starting (webhook)…")
+        app.run_webhook(
+            listen=config.WEBHOOK_LISTEN,
+            port=config.WEBHOOK_PORT,
+            url_path=config.WEBHOOK_PATH,
+            webhook_url=config.WEBHOOK_URL,
+            secret_token=config.WEBHOOK_SECRET_TOKEN or None,
+            drop_pending_updates=True,
+        )
+    else:
+        logger.warning(
+            "WEBHOOK_BASE_URL is not set; falling back to polling mode. "
+            "Set WEBHOOK_BASE_URL (or RAILWAY_PUBLIC_DOMAIN) in production."
+        )
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
