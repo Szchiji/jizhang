@@ -31,6 +31,7 @@ async def init_db() -> None:
                 id           BIGSERIAL PRIMARY KEY,
                 forward_uid  BIGINT,
                 forward_name TEXT,
+                project_name TEXT NOT NULL,
                 amount       NUMERIC(18,2) NOT NULL,
                 chat_id      BIGINT NOT NULL,
                 message_id   BIGINT NOT NULL,
@@ -44,9 +45,44 @@ async def init_db() -> None:
             ON entries (source_hash)
         """)
         await conn.execute("""
+            ALTER TABLE entries
+            ADD COLUMN IF NOT EXISTS project_name TEXT
+        """)
+        await conn.execute(
+            "UPDATE entries SET project_name = $1 WHERE project_name IS NULL OR BTRIM(project_name) = ''",
+            config.DEFAULT_PROJECT_NAME,
+        )
+        await conn.execute("""
+            ALTER TABLE entries
+            ALTER COLUMN project_name SET NOT NULL
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_user_project
+            ON entries (forward_uid, project_name)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_date_project
+            ON entries (date_local, project_name)
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS aliases (
                 keyword    TEXT    PRIMARY KEY,
                 user_id    BIGINT NOT NULL,
+                created_by BIGINT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS project_aliases (
+                keyword      TEXT    PRIMARY KEY,
+                project_name TEXT    NOT NULL,
+                created_by   BIGINT  NOT NULL,
+                created_at   TIMESTAMPTZ NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id    BIGINT PRIMARY KEY,
                 created_by BIGINT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL
             )
@@ -63,6 +99,7 @@ async def insert_entry(
     *,
     forward_uid: Optional[int],
     forward_name: Optional[str],
+    project_name: str,
     amount: float,
     chat_id: int,
     message_id: int,
@@ -78,11 +115,12 @@ async def insert_entry(
         try:
             await conn.execute(
                 """INSERT INTO entries
-                   (forward_uid, forward_name, amount, chat_id, message_id,
+                   (forward_uid, forward_name, project_name, amount, chat_id, message_id,
                     source_hash, created_at, date_local)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
                 forward_uid,
                 forward_name,
+                project_name,
                 amount,
                 chat_id,
                 message_id,
@@ -95,6 +133,33 @@ async def insert_entry(
         return True
     except asyncpg.UniqueViolationError:
         return False
+
+
+async def clear_entries_by_forward_uid(forward_uid: int) -> int:
+    """Delete all entries matching *forward_uid* and return deleted count."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM entries WHERE forward_uid = $1",
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1])
+
+
+async def clear_entries_by_forward_uid_and_project(forward_uid: int, project_name: str) -> int:
+    """Delete entries matching *forward_uid* and *project_name*."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM entries WHERE forward_uid = $1 AND project_name = $2",
+            forward_uid,
+            project_name,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1])
 
 
 # ── Alias operations ───────────────────────────────────────────────────────────
@@ -145,6 +210,98 @@ async def list_aliases() -> list[tuple[str, int]]:
     return [(row["keyword"], row["user_id"]) for row in rows]
 
 
+async def set_project_alias(keyword: str, project_name: str, created_by: int) -> None:
+    """Upsert a keyword → project_name mapping."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO project_aliases (keyword, project_name, created_by, created_at)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT(keyword) DO UPDATE
+               SET project_name = EXCLUDED.project_name,
+                   created_by = EXCLUDED.created_by,
+                   created_at = EXCLUDED.created_at""",
+            keyword,
+            project_name,
+            created_by,
+            datetime.now(config.TZ),
+        )
+    finally:
+        await conn.close()
+
+
+async def list_project_aliases() -> list[tuple[str, str]]:
+    """Return all (keyword, project_name) pairs sorted by keyword."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT keyword, project_name FROM project_aliases ORDER BY keyword"
+        )
+    finally:
+        await conn.close()
+    return [(row["keyword"], row["project_name"]) for row in rows]
+
+
+async def resolve_project_by_text(text: str) -> Optional[str]:
+    """Return project from the best-matching keyword found in *text*."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT project_name
+               FROM project_aliases
+               WHERE $1 ILIKE ('%%' || keyword || '%%')
+               ORDER BY LENGTH(keyword) DESC
+               LIMIT 1""",
+            text,
+        )
+    finally:
+        await conn.close()
+    return row["project_name"] if row else None
+
+
+async def upsert_allowed_user(user_id: int, created_by: int) -> None:
+    """Add/update an allowed user."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO allowed_users (user_id, created_by, created_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(user_id) DO UPDATE
+               SET created_by = EXCLUDED.created_by,
+                   created_at = EXCLUDED.created_at""",
+            user_id,
+            created_by,
+            datetime.now(config.TZ),
+        )
+    finally:
+        await conn.close()
+
+
+async def remove_allowed_user(user_id: int) -> bool:
+    """Remove an allowed user. Returns True when deleted."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM allowed_users WHERE user_id = $1",
+            user_id,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1]) > 0
+
+
+async def list_allowed_users() -> list[int]:
+    """Return all allowed user IDs sorted ascending."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT user_id FROM allowed_users ORDER BY user_id"
+        )
+    finally:
+        await conn.close()
+    return [int(row["user_id"]) for row in rows]
+
+
 # ── Statistics ─────────────────────────────────────────────────────────────────
 
 
@@ -166,11 +323,20 @@ async def get_daily_stats(target_date: date) -> dict:
                ORDER BY SUM(amount) DESC""",
             target_date,
         )
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local = $1
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            target_date,
+        )
     finally:
         await conn.close()
 
     persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
-    return {"count": count, "total": total, "persons": persons}
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "persons": persons, "projects": projects}
 
 
 async def get_monthly_stats(year: int, month: int) -> dict:
@@ -197,8 +363,54 @@ async def get_monthly_stats(year: int, month: int) -> dict:
             year,
             month,
         )
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE EXTRACT(YEAR FROM date_local) = $1
+                 AND EXTRACT(MONTH FROM date_local) = $2
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            year,
+            month,
+        )
     finally:
         await conn.close()
 
     persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
-    return {"count": count, "total": total, "persons": persons}
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "persons": persons, "projects": projects}
+
+
+async def get_monthly_stats_for_user(year: int, month: int, forward_uid: int) -> dict:
+    """Return monthly statistics for a single forwarded user ID."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE EXTRACT(YEAR FROM date_local) = $1
+                 AND EXTRACT(MONTH FROM date_local) = $2
+                 AND forward_uid = $3""",
+            year,
+            month,
+            forward_uid,
+        )
+        count, total = row[0], float(row[1])
+
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE EXTRACT(YEAR FROM date_local) = $1
+                 AND EXTRACT(MONTH FROM date_local) = $2
+                 AND forward_uid = $3
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            year,
+            month,
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "projects": projects}
