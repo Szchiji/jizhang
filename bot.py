@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
@@ -46,6 +47,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class PollingLockNotAcquired(RuntimeError):
+    """Raised when another replica already owns the polling advisory lock."""
+
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
 
@@ -75,40 +80,46 @@ def _is_allowed(update: Update) -> bool:
 def _source_hash(message: Message) -> str:
     """Build a deduplication hash from the message's forwarding metadata."""
     parts: list[str] = []
+    payload = (message.text or message.caption or "").strip()
+    payload_hash = hashlib.sha256(payload.encode()).hexdigest() if payload else ""
 
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
         parts.append(type(origin).__name__)
         sender = getattr(origin, "sender_user", None)
         if sender:
-            parts += [str(sender.id), str(int(origin.date.timestamp()))]
+            parts += [str(sender.id), str(int(origin.date.timestamp())), payload_hash]
         else:
             name = getattr(origin, "sender_user_name", None)
             chat = getattr(origin, "chat", None)
             if name:
-                parts += [name, str(int(origin.date.timestamp()))]
+                parts += [name, str(int(origin.date.timestamp())), payload_hash]
             elif chat:
                 parts.append(str(chat.id))
                 mid = getattr(origin, "message_id", None)
                 if mid:
                     parts.append(str(mid))
+                parts.append(payload_hash)
     elif getattr(message, "forward_from", None):
         parts += [
             "User",
             str(message.forward_from.id),
             str(int(message.forward_date.timestamp())),
+            payload_hash,
         ]
     elif getattr(message, "forward_from_chat", None):
         parts += [
             "Chat",
             str(message.forward_from_chat.id),
             str(message.forward_from_message_id or 0),
+            payload_hash,
         ]
     elif getattr(message, "forward_sender_name", None):
         parts += [
             "Hidden",
             message.forward_sender_name,
             str(int(message.forward_date.timestamp())),
+            payload_hash,
         ]
     else:
         # Fallback: use receiving context (no dedup guarantee)
@@ -245,6 +256,19 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name)
 
+    if len(amounts) > 1 and ("+" in text or "＋" in text):
+        total_amount = round(sum(amounts), 2)
+        note = " + ".join(f"{amt:,.2f}" for amt in amounts)
+        await _do_record(
+            message,
+            fwd_uid,
+            fwd_name,
+            total_amount,
+            src_hash,
+            amount_note=f"（相加：{note}）",
+        )
+        return
+
     if len(amounts) == 1:
         await _do_record(message, fwd_uid, fwd_name, amounts[0], src_hash)
     else:
@@ -318,6 +342,7 @@ async def _do_record(
     fwd_name: Optional[str],
     amount: float,
     src_hash: str,
+    amount_note: Optional[str] = None,
 ) -> None:
     inserted = await insert_entry(
         forward_uid=fwd_uid,
@@ -329,8 +354,11 @@ async def _do_record(
     )
     who = fwd_name or (str(fwd_uid) if fwd_uid else "未知")
     if inserted:
+        amount_line = f"💰 金额：¥{amount:,.2f}"
+        if amount_note:
+            amount_line += f"\n🧮 {amount_note}"
         await message.reply_text(
-            f"✅ 已记账\n👤 来源：{who}\n💰 金额：¥{amount:,.2f}"
+            f"✅ 已记账\n👤 来源：{who}\n{amount_line}"
         )
     else:
         await message.reply_text("⚠️ 该消息已记录过，跳过重复入账")
@@ -410,7 +438,7 @@ async def _post_init(application: Application) -> None:
     )
     if not locked:
         await lock_conn.close()
-        raise RuntimeError(
+        raise PollingLockNotAcquired(
             "another bot instance already holds the polling lock; "
             "stop duplicate replicas or set a different POLLING_LOCK_ID"
         )
@@ -440,43 +468,55 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    app = (
-        Application.builder()
-        .token(config.BOT_TOKEN)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
-    )
-
-    # Commands
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("bindid", cmd_bindid))
-    app.add_handler(CommandHandler("listaliases", cmd_listaliases))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-
-    # Forward message handler (text or caption)
-    app.add_handler(
-        MessageHandler(
-            filters.FORWARDED & (filters.TEXT | filters.CAPTION),
-            handle_forward,
+    retry_seconds = 30
+    while True:
+        app = (
+            Application.builder()
+            .token(config.BOT_TOKEN)
+            .post_init(_post_init)
+            .post_shutdown(_post_shutdown)
+            .build()
         )
-    )
 
-    # Inline-keyboard callback for amount selection
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
-    app.add_error_handler(_on_error)
+        # Commands
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("bindid", cmd_bindid))
+        app.add_handler(CommandHandler("listaliases", cmd_listaliases))
+        app.add_handler(CommandHandler("stats", cmd_stats))
 
-    # Daily report at 00:00 local time
-    midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
-    app.job_queue.run_daily(_job_daily, time=midnight)
-
-    logger.info("Bot starting (polling)…")
-    try:
-        app.run_polling(drop_pending_updates=True)
-    except Conflict:
-        logger.exception(
-            "Telegram polling conflict: only one bot instance can call getUpdates."
+        # Forward message handler (text or caption)
+        app.add_handler(
+            MessageHandler(
+                filters.FORWARDED & (filters.TEXT | filters.CAPTION),
+                handle_forward,
+            )
         )
+
+        # Inline-keyboard callback for amount selection
+        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
+        app.add_error_handler(_on_error)
+
+        # Daily report at 00:00 local time
+        midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
+        app.job_queue.run_daily(_job_daily, time=midnight)
+
+        logger.info("Bot starting (polling)…")
+        try:
+            app.run_polling(drop_pending_updates=True)
+            return
+        except PollingLockNotAcquired:
+            logger.warning(
+                "Polling lock unavailable; another replica is active. Retrying in %s seconds.",
+                retry_seconds,
+            )
+            time.sleep(retry_seconds)
+        except Conflict:
+            logger.exception(
+                "Telegram polling conflict: only one bot instance can call getUpdates. "
+                "Retrying in %s seconds.",
+                retry_seconds,
+            )
+            time.sleep(retry_seconds)
 
 
 if __name__ == "__main__":

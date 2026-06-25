@@ -31,7 +31,7 @@ _AMOUNT_RE = re.compile(
 
 
 def extract_amounts(text: str) -> list[float]:
-    """Return deduplicated candidate amounts from *text* in order of appearance.
+    """Return candidate amounts from *text* in order of appearance.
 
     Numbers that overlap with date, time, phone or other non-monetary patterns
     are silently discarded.  Only values in the range [0.01, 999 999] are kept.
@@ -45,7 +45,6 @@ def extract_amounts(text: str) -> list[float]:
         for m in pat.finditer(text):
             excluded.update(range(m.start(), m.end()))
 
-    seen: set[float] = set()
     amounts: list[float] = []
 
     for m in _AMOUNT_RE.finditer(text):
@@ -60,8 +59,7 @@ def extract_amounts(text: str) -> list[float]:
         except ValueError:
             continue
 
-        if 0.01 <= value <= 999_999 and value not in seen:
-            seen.add(value)
+        if 0.01 <= value <= 999_999:
             amounts.append(value)
 
     return amounts
