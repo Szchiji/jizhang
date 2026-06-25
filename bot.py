@@ -97,12 +97,9 @@ def _is_allowed(update: Update) -> bool:
             return True
         return False
 
-    if ctype == "private":
-        if runtime_allowed_user_ids and uid not in runtime_allowed_user_ids:
-            return False
-        return True
-
     if runtime_allowed_user_ids and uid not in runtime_allowed_user_ids:
+        return False
+    if runtime_allowed_chat_ids and cid not in runtime_allowed_chat_ids:
         return False
 
     return True
