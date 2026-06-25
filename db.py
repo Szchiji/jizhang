@@ -318,6 +318,20 @@ async def list_aliases(owner_user_id: Optional[int] = None) -> list[tuple[str, i
     return [(row["keyword"], row["user_id"]) for row in rows]
 
 
+async def remove_alias(keyword: str, owner_user_id: int = 0) -> bool:
+    """Remove one keyword → user mapping under the given owner scope."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM aliases WHERE keyword = $1 AND owner_user_id = $2",
+            keyword,
+            owner_user_id,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1]) > 0
+
+
 async def set_project_alias(
     keyword: str,
     project_name: str,
@@ -363,6 +377,20 @@ async def list_project_aliases(owner_user_id: Optional[int] = None) -> list[tupl
     finally:
         await conn.close()
     return [(row["keyword"], row["project_name"]) for row in rows]
+
+
+async def remove_project_alias(keyword: str, owner_user_id: int = 0) -> bool:
+    """Remove one keyword → project mapping under the given owner scope."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM project_aliases WHERE keyword = $1 AND owner_user_id = $2",
+            keyword,
+            owner_user_id,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1]) > 0
 
 
 async def resolve_project_by_text(text: str, owner_user_id: Optional[int] = None) -> Optional[str]:

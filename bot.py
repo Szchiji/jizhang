@@ -43,7 +43,9 @@ from db import (
     list_allowed_users,
     list_aliases,
     list_project_aliases,
+    remove_alias,
     remove_allowed_user,
+    remove_project_alias,
     resolve_project_by_text,
     set_alias,
     set_project_alias,
@@ -369,6 +371,8 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         "bindproject_name",
         "bindid_keyword",
         "bindid_user",
+        "delalias_keyword",
+        "delproject_keyword",
     }:
         _clear_flow(context)
         await update.message.reply_text("❌ 仅管理员可执行该操作")
@@ -417,6 +421,38 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         _clear_flow(context)
         await update.message.reply_text(
             f"✅ 已绑定项目关键词：<code>{keyword}</code> → <code>{raw}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(is_admin),
+        )
+        return
+
+    if action == "delalias_keyword":
+        owner_user_id = 0 if is_admin else update.effective_user.id
+        removed = await remove_alias(raw, owner_user_id=owner_user_id)
+        _clear_flow(context)
+        msg = (
+            f"✅ 已删除用户关键词：<code>{raw}</code>"
+            if removed
+            else f"ℹ️ 用户关键词 <code>{raw}</code> 不存在，已保持现状"
+        )
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(is_admin),
+        )
+        return
+
+    if action == "delproject_keyword":
+        owner_user_id = 0 if is_admin else update.effective_user.id
+        removed = await remove_project_alias(raw, owner_user_id=owner_user_id)
+        _clear_flow(context)
+        msg = (
+            f"✅ 已删除项目关键词：<code>{raw}</code>"
+            if removed
+            else f"ℹ️ 项目关键词 <code>{raw}</code> 不存在，已保持现状"
+        )
+        await update.message.reply_text(
+            msg,
             parse_mode=ParseMode.HTML,
             reply_markup=_main_menu_keyboard(is_admin),
         )
@@ -645,7 +681,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             or update.effective_chat.type != "private"
             or (
                 not is_admin
-                and action not in {"listprojects", "bindproject", "clearself", "listaliases", "bindid"}
+                and action
+                not in {
+                    "listprojects",
+                    "bindproject",
+                    "clearself",
+                    "listaliases",
+                    "bindid",
+                    "delalias",
+                    "delproject",
+                }
             )
         ):
             await query.edit_message_text("❌ 当前操作仅管理员可在私聊中执行")
@@ -663,10 +708,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if not aliases
                 else "📋 <b>别名列表</b>\n" + "\n".join(lines)
             )
+            list_actions = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🗑 删除用户关键词", callback_data="menu:delalias")],
+                    [InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")],
+                ]
+            )
             await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=_main_menu_keyboard(is_admin),
+                reply_markup=list_actions,
             )
             return
 
@@ -682,10 +733,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"• <code>{kw}</code> → <code>{project}</code>" for kw, project in projects
                 )
             )
+            list_actions = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🗑 删除项目关键词", callback_data="menu:delproject")],
+                    [InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")],
+                ]
+            )
             await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=_main_menu_keyboard(is_admin),
+                reply_markup=list_actions,
             )
             return
 
@@ -708,6 +765,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _clear_flow(context)
             context.user_data["flow_action"] = "bindproject_keyword"
             await query.edit_message_text("请输入关键词", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "delalias":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "delalias_keyword"
+            await query.edit_message_text("请输入要删除的用户关键词", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "delproject":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "delproject_keyword"
+            await query.edit_message_text("请输入要删除的项目关键词", reply_markup=_cancel_flow_keyboard())
             return
 
         if action == "clearself":
