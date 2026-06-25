@@ -31,16 +31,21 @@ from telegram.ext import (
 
 import config
 from db import (
+    clear_entries_by_forward_uid_and_project,
     clear_entries_by_forward_uid,
     get_alias,
     get_daily_stats,
     get_monthly_stats,
+    get_monthly_stats_for_user,
     init_db,
     insert_entry,
     list_aliases,
+    list_project_aliases,
+    resolve_project_by_text,
     set_alias,
+    set_project_alias,
 )
-from parser import extract_amounts
+from parser import extract_amounts, extract_project_name
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
@@ -172,8 +177,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📋 <b>管理命令（仅管理员）：</b>\n"
         "/bindid &lt;关键词&gt; &lt;用户ID&gt; — 绑定关键词到用户\n"
         "/listaliases — 查看所有关键词别名\n"
+        "/bindproject &lt;关键词&gt; &lt;项目名&gt; — 绑定关键词到项目\n"
+        "/listprojects — 查看所有项目关键词\n"
         "/clearuser &lt;用户ID&gt; — 清空该用户所有记账\n"
-        "/stats — 当月入账统计",
+        "/clearuserproject &lt;用户ID&gt; &lt;项目名&gt; — 清空该用户在项目下的记账\n"
+        "/stats [用户ID] — 查看当月统计（可按用户）",
         parse_mode=ParseMode.HTML,
     )
 
@@ -222,6 +230,52 @@ async def cmd_listaliases(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+async def cmd_bindproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("❌ 无权限访问")
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅管理员可使用此命令")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text("用法：/bindproject &lt;关键词&gt; &lt;项目名&gt;", parse_mode=ParseMode.HTML)
+        return
+
+    keyword = args[0]
+    project_name = " ".join(args[1:]).strip()
+    if not project_name:
+        await update.message.reply_text("❌ 项目名不能为空")
+        return
+
+    await set_project_alias(keyword, project_name, update.effective_user.id)
+    await update.message.reply_text(
+        f"✅ 已绑定项目关键词：<code>{keyword}</code> → <code>{project_name}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_listprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("❌ 无权限访问")
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅管理员可使用此命令")
+        return
+
+    aliases = await list_project_aliases()
+    if not aliases:
+        await update.message.reply_text("暂无项目关键词配置")
+        return
+
+    lines = [f"• <code>{kw}</code> → <code>{project}</code>" for kw, project in aliases]
+    await update.message.reply_text(
+        "📋 <b>项目关键词列表</b>\n" + "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_clearuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
@@ -248,17 +302,67 @@ async def cmd_clearuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def cmd_clearuserproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("❌ 无权限访问")
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅管理员可使用此命令")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "用法：/clearuserproject &lt;用户ID&gt; &lt;项目名&gt;",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        forward_uid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ 用户ID 必须是整数")
+        return
+
+    project_name = " ".join(args[1:]).strip()
+    if not project_name:
+        await update.message.reply_text("❌ 项目名不能为空")
+        return
+
+    deleted = await clear_entries_by_forward_uid_and_project(forward_uid, project_name)
+    await update.message.reply_text(
+        f"✅ 已清空用户 <code>{forward_uid}</code> 在项目 <code>{project_name}</code> 的记账，共删除 <b>{deleted}</b> 条",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
 
     now = datetime.now(config.TZ)
-    stats = await get_monthly_stats(now.year, now.month)
-    await update.message.reply_text(
-        _fmt_monthly(now.year, now.month, stats),
-        parse_mode=ParseMode.HTML,
-    )
+    args = context.args or []
+    if len(args) > 1:
+        await update.message.reply_text("用法：/stats [用户ID]", parse_mode=ParseMode.HTML)
+        return
+    if args:
+        if not _is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ 仅管理员可按用户查看统计")
+            return
+        try:
+            forward_uid = int(args[0])
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数")
+            return
+
+        stats = await get_monthly_stats_for_user(now.year, now.month, forward_uid)
+        text = _fmt_monthly_user(now.year, now.month, forward_uid, stats)
+    else:
+        stats = await get_monthly_stats(now.year, now.month)
+        text = _fmt_monthly(now.year, now.month, stats)
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 # ── Forward handler ────────────────────────────────────────────────────────────
@@ -279,6 +383,11 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     src_hash = _source_hash(message)
     fwd_uid, fwd_name = _forward_identity(message)
+    project_name = (
+        extract_project_name(text)
+        or await resolve_project_by_text(text)
+        or config.DEFAULT_PROJECT_NAME
+    )
 
     # Alias look-up: if we have a name but no UID, try the alias table
     if fwd_uid is None and fwd_name:
@@ -293,17 +402,19 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             fwd_name,
             total_amount,
             src_hash,
+            project_name=project_name,
             amount_note=f"（相加：{note}）",
         )
         return
 
     if len(amounts) == 1:
-        await _do_record(message, fwd_uid, fwd_name, amounts[0], src_hash)
+        await _do_record(message, fwd_uid, fwd_name, amounts[0], src_hash, project_name=project_name)
     else:
         # Multiple candidates — let the user pick
         context.user_data["pending"] = {
             "fwd_uid": fwd_uid,
             "fwd_name": fwd_name,
+            "project_name": project_name,
             "src_hash": src_hash,
             "amounts": amounts,
             "chat_id": message.chat_id,
@@ -347,6 +458,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     inserted = await insert_entry(
         forward_uid=pending["fwd_uid"],
         forward_name=pending["fwd_name"],
+        project_name=pending["project_name"],
         amount=amount,
         chat_id=pending["chat_id"],
         message_id=pending["msg_id"],
@@ -355,7 +467,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     who = pending["fwd_name"] or (str(pending["fwd_uid"]) if pending["fwd_uid"] else "未知")
     if inserted:
         await query.edit_message_text(
-            f"✅ 已记账\n👤 来源：{who}\n💰 金额：¥{amount:,.2f}"
+            f"✅ 已记账\n👤 来源：{who}\n📁 项目：{pending['project_name']}\n💰 金额：¥{amount:,.2f}"
         )
     else:
         await query.edit_message_text("⚠️ 该消息已记录过，跳过重复入账")
@@ -370,11 +482,13 @@ async def _do_record(
     fwd_name: Optional[str],
     amount: float,
     src_hash: str,
+    project_name: str,
     amount_note: Optional[str] = None,
 ) -> None:
     inserted = await insert_entry(
         forward_uid=fwd_uid,
         forward_name=fwd_name,
+        project_name=project_name,
         amount=amount,
         chat_id=message.chat_id,
         message_id=message.message_id,
@@ -386,7 +500,7 @@ async def _do_record(
         if amount_note:
             amount_line += f"\n🧮 {amount_note}"
         await message.reply_text(
-            f"✅ 已记账\n👤 来源：{who}\n{amount_line}"
+            f"✅ 已记账\n👤 来源：{who}\n📁 项目：{project_name}\n{amount_line}"
         )
     else:
         await message.reply_text("⚠️ 该消息已记录过，跳过重复入账")
@@ -408,6 +522,13 @@ def _fmt_daily(d: object, stats: dict) -> str:
             lines.append(f"  • {name}：¥{total:,.2f}（{cnt} 笔）")
     else:
         lines.append("  （无数据）")
+    lines.append("")
+    lines.append("📁 分项目明细：")
+    if stats.get("projects"):
+        for name, total, cnt in stats["projects"]:
+            lines.append(f"  • {name}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
     return "\n".join(lines)
 
 
@@ -422,6 +543,29 @@ def _fmt_monthly(year: int, month: int, stats: dict) -> str:
     if stats["persons"]:
         for i, (name, total, cnt) in enumerate(stats["persons"], 1):
             lines.append(f"  {i}. {name}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    lines.append("")
+    lines.append("📁 分项目排行：")
+    if stats.get("projects"):
+        for i, (project, total, cnt) in enumerate(stats["projects"], 1):
+            lines.append(f"  {i}. {project}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    return "\n".join(lines)
+
+
+def _fmt_monthly_user(year: int, month: int, forward_uid: int, stats: dict) -> str:
+    lines = [
+        f"📊 <b>{year}年{month}月 用户 {forward_uid} 入账统计</b>",
+        f"💰 总额：¥{stats['total']:,.2f}",
+        f"📝 笔数：{stats['count']} 笔",
+        "",
+        "📁 分项目排行：",
+    ]
+    if stats.get("projects"):
+        for i, (project, total, cnt) in enumerate(stats["projects"], 1):
+            lines.append(f"  {i}. {project}：¥{total:,.2f}（{cnt} 笔）")
     else:
         lines.append("  （无数据）")
     return "\n".join(lines)
@@ -510,7 +654,10 @@ def main() -> None:
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("bindid", cmd_bindid))
         app.add_handler(CommandHandler("listaliases", cmd_listaliases))
+        app.add_handler(CommandHandler("bindproject", cmd_bindproject))
+        app.add_handler(CommandHandler("listprojects", cmd_listprojects))
         app.add_handler(CommandHandler("clearuser", cmd_clearuser))
+        app.add_handler(CommandHandler("clearuserproject", cmd_clearuserproject))
         app.add_handler(CommandHandler("stats", cmd_stats))
 
         # Forward message handler (text or caption)

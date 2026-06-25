@@ -51,6 +51,7 @@ python bot.py
    | `DATABASE_URL` | PostgreSQL 连接串（如 `postgresql://postgres@host:5432/db`，也会自动识别 `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL`） |
    | `TZ` | 时区（默认 `Asia/Shanghai`） |
    | `POLLING_LOCK_ID` | 轮询单实例锁 ID（默认 `20260625`，多副本需保持一致） |
+   | `DEFAULT_PROJECT_NAME` | 未识别到项目时使用的默认项目名（默认 `默认项目`） |
 
 3. 在 Railway 中为项目绑定 PostgreSQL 服务，并确保 `DATABASE_URL` 已注入。
 
@@ -66,8 +67,11 @@ python bot.py
 | `/start` | 所有人 | 欢迎信息与用法说明 |
 | `/bindid <关键词> <用户ID>` | 管理员 | 将转发来源名称绑定到 Telegram 用户 ID |
 | `/listaliases` | 管理员 | 查看所有关键词别名 |
+| `/bindproject <关键词> <项目名>` | 管理员 | 将关键词绑定到项目名 |
+| `/listprojects` | 管理员 | 查看所有项目关键词 |
 | `/clearuser <用户ID>` | 管理员 | 清空该用户的所有记账记录 |
-| `/stats` | 所有人 | 查看本月入账统计 |
+| `/clearuserproject <用户ID> <项目名>` | 管理员 | 清空该用户在某项目下的记账 |
+| `/stats [用户ID]` | 所有人/管理员 | 查看本月统计；传用户ID时查看该用户分项目统计（仅管理员） |
 
 ---
 
@@ -88,6 +92,12 @@ python bot.py
 1. 转发来源用户的 **Telegram 用户 ID**（最可靠）
 2. 转发来源的 **显示名称**
 3. 通过 `/bindid` 绑定的 **关键词别名**
+
+### 项目识别优先级
+
+1. 文本中的显式项目标记：`#项目名` / `项目:项目名` / `项目A 100`
+2. 通过 `/bindproject` 绑定的关键词命中
+3. 默认项目名（`DEFAULT_PROJECT_NAME`）
 
 ### 幂等防重复
 

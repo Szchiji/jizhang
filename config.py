@@ -51,3 +51,7 @@ TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 # ── Polling singleton lock ──────────────────────────────────────────────────────
 # Prevent multiple bot replicas from polling Telegram updates at the same time.
 POLLING_LOCK_ID: int = int(os.environ.get("POLLING_LOCK_ID", "20260625"))
+
+# ── Bookkeeping project dimension ────────────────────────────────────────────────
+# Fallback project name when no explicit project can be parsed from message text.
+DEFAULT_PROJECT_NAME: str = os.environ.get("DEFAULT_PROJECT_NAME", "默认项目")

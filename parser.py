@@ -29,6 +29,16 @@ _AMOUNT_RE = re.compile(
     r"|(?<!\d)\d+(?!\d)"                                         # plain integer
 )
 
+_PROJECT_TAG_RE = re.compile(
+    r"(?:^|\s)#([A-Za-z0-9_\-\u4e00-\u9fff]{1,32})(?=\s|$)"
+)
+_PROJECT_KEYVAL_RE = re.compile(
+    r"项目\s*[:：]\s*([A-Za-z0-9_\-\u4e00-\u9fff]{1,32})"
+)
+_PROJECT_PREFIX_RE = re.compile(
+    r"(?:^|\s)(项目[A-Za-z0-9_\-\u4e00-\u9fff]{1,31})(?=\s|$)"
+)
+
 
 def extract_amounts(text: str) -> list[float]:
     """Return candidate amounts from *text* in order of appearance.
@@ -63,3 +73,16 @@ def extract_amounts(text: str) -> list[float]:
             amounts.append(value)
 
     return amounts
+
+
+def extract_project_name(text: str) -> str | None:
+    """Extract project name from text using explicit project markers."""
+    if not text:
+        return None
+
+    for pat in (_PROJECT_TAG_RE, _PROJECT_KEYVAL_RE, _PROJECT_PREFIX_RE):
+        m = pat.search(text)
+        if m:
+            return m.group(1).strip()
+
+    return None
