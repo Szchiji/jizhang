@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import html
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
@@ -116,6 +117,10 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("➕ 绑定用户关键词", callback_data="menu:bindid"),
+                InlineKeyboardButton("📋 查看用户关键词", callback_data="menu:listaliases"),
+            ],
+            [
                 InlineKeyboardButton("➕ 绑定项目关键词", callback_data="menu:bindproject"),
                 InlineKeyboardButton("📋 查看项目关键词", callback_data="menu:listprojects"),
             ],
@@ -129,11 +134,33 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     )
 
 
-def _fmt_allowed_user_ids() -> str:
+async def _get_user_nickname(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> Optional[str]:
+    try:
+        chat = await context.bot.get_chat(user_id)
+    except Exception:
+        return None
+    return (
+        getattr(chat, "full_name", None)
+        or getattr(chat, "title", None)
+        or (f"@{chat.username}" if getattr(chat, "username", None) else None)
+    )
+
+
+def _fmt_uid_with_nickname(user_id: int, nickname: Optional[str]) -> str:
+    if nickname:
+        return f"<code>{user_id}</code>（{html.escape(nickname)}）"
+    return f"<code>{user_id}</code>"
+
+
+async def _fmt_allowed_user_ids(context: ContextTypes.DEFAULT_TYPE) -> str:
     if not runtime_allowed_user_ids:
         return "（未配置，当前不限制用户白名单）"
     ids = sorted(runtime_allowed_user_ids)
-    return "\n".join(f"• <code>{uid}</code>" for uid in ids)
+    lines: list[str] = []
+    for uid in ids:
+        nickname = await _get_user_nickname(context, uid)
+        lines.append(f"• {_fmt_uid_with_nickname(uid, nickname)}")
+    return "\n".join(lines)
 
 
 def _cancel_flow_keyboard() -> InlineKeyboardMarkup:
@@ -337,7 +364,12 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         return
 
     is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
-    if not is_admin and action not in {"bindproject_keyword", "bindproject_name"}:
+    if not is_admin and action not in {
+        "bindproject_keyword",
+        "bindproject_name",
+        "bindid_keyword",
+        "bindid_user",
+    }:
         _clear_flow(context)
         await update.message.reply_text("❌ 仅管理员可执行该操作")
         return
@@ -360,12 +392,15 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
             return
         keyword = context.user_data.get("flow_keyword", "").strip()
-        await set_alias(keyword, target_uid, update.effective_user.id)
+        owner_user_id = 0 if is_admin else update.effective_user.id
+        await set_alias(keyword, target_uid, update.effective_user.id, owner_user_id=owner_user_id)
+        nickname = await _get_user_nickname(context, target_uid)
+        user_label = _fmt_uid_with_nickname(target_uid, nickname)
         _clear_flow(context)
         await update.message.reply_text(
-            f"✅ 已绑定：<code>{keyword}</code> → <code>{target_uid}</code>",
+            f"✅ 已绑定：<code>{keyword}</code> → {user_label}",
             parse_mode=ParseMode.HTML,
-            reply_markup=_main_menu_keyboard(True),
+            reply_markup=_main_menu_keyboard(is_admin),
         )
         return
 
@@ -513,7 +548,7 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         fwd_uid = current_uid
         fwd_name = current_user.full_name or current_user.username or str(current_uid)
     elif fwd_uid is None and fwd_name:
-        fwd_uid = await get_alias(fwd_name)
+        fwd_uid = await get_alias(fwd_name, owner_user_id=None if is_admin else current_uid)
 
     if len(amounts) > 1 and any(op in text for op in ("+", "＋", "-", "－", "减")):
         total_amount = round(sum(amounts), 2)
@@ -608,25 +643,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if (
             not update.effective_chat
             or update.effective_chat.type != "private"
-            or (not is_admin and action not in {"listprojects", "bindproject", "clearself"})
+            or (
+                not is_admin
+                and action not in {"listprojects", "bindproject", "clearself", "listaliases", "bindid"}
+            )
         ):
             await query.edit_message_text("❌ 当前操作仅管理员可在私聊中执行")
             return
 
         if action == "listaliases":
             _clear_flow(context)
-            aliases = await list_aliases()
+            aliases = await list_aliases(owner_user_id=None if is_admin else update.effective_user.id)
+            lines: list[str] = []
+            for kw, uid in aliases:
+                nickname = await _get_user_nickname(context, uid)
+                lines.append(f"• <code>{kw}</code> → {_fmt_uid_with_nickname(uid, nickname)}")
             text = (
                 "暂无别名配置"
                 if not aliases
-                else "📋 <b>别名列表</b>\n" + "\n".join(
-                    f"• <code>{kw}</code> → <code>{uid}</code>" for kw, uid in aliases
-                )
+                else "📋 <b>别名列表</b>\n" + "\n".join(lines)
             )
             await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=_main_menu_keyboard(True),
+                reply_markup=_main_menu_keyboard(is_admin),
             )
             return
 
@@ -652,7 +692,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "allowlist":
             _clear_flow(context)
             await query.edit_message_text(
-                "📋 <b>当前可用用户列表</b>\n" + _fmt_allowed_user_ids(),
+                "📋 <b>当前可用用户列表</b>\n" + await _fmt_allowed_user_ids(context),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_main_menu_keyboard(True),
             )

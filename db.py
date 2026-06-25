@@ -68,9 +68,37 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS aliases (
                 keyword    TEXT    PRIMARY KEY,
                 user_id    BIGINT NOT NULL,
+                owner_user_id BIGINT NOT NULL DEFAULT 0,
                 created_by BIGINT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL
             )
+        """)
+        await conn.execute("""
+            ALTER TABLE aliases
+            ADD COLUMN IF NOT EXISTS owner_user_id BIGINT
+        """)
+        await conn.execute(
+            "UPDATE aliases SET owner_user_id = 0 WHERE owner_user_id IS NULL"
+        )
+        await conn.execute("""
+            ALTER TABLE aliases
+            ALTER COLUMN owner_user_id SET NOT NULL
+        """)
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'aliases_pkey'
+                ) THEN
+                    ALTER TABLE aliases DROP CONSTRAINT aliases_pkey;
+                END IF;
+            END$$
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_aliases_keyword_owner
+            ON aliases (keyword, owner_user_id)
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS project_aliases (
@@ -218,19 +246,25 @@ async def clear_entries_by_forward_uid_and_project(forward_uid: int, project_nam
 # ── Alias operations ───────────────────────────────────────────────────────────
 
 
-async def set_alias(keyword: str, user_id: int, created_by: int) -> None:
+async def set_alias(
+    keyword: str,
+    user_id: int,
+    created_by: int,
+    owner_user_id: int = 0,
+) -> None:
     """Upsert a keyword → user_id mapping."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
         await conn.execute(
-            """INSERT INTO aliases (keyword, user_id, created_by, created_at)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT(keyword) DO UPDATE
+            """INSERT INTO aliases (keyword, user_id, owner_user_id, created_by, created_at)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT(keyword, owner_user_id) DO UPDATE
                SET user_id = EXCLUDED.user_id,
                    created_by = EXCLUDED.created_by,
                    created_at = EXCLUDED.created_at""",
             keyword,
             user_id,
+            owner_user_id,
             created_by,
             datetime.now(config.TZ),
         )
@@ -238,26 +272,47 @@ async def set_alias(keyword: str, user_id: int, created_by: int) -> None:
         await conn.close()
 
 
-async def get_alias(keyword: str) -> Optional[int]:
+async def get_alias(keyword: str, owner_user_id: Optional[int] = None) -> Optional[int]:
     """Return the user_id bound to *keyword*, or ``None``."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
-        row = await conn.fetchrow(
-            "SELECT user_id FROM aliases WHERE keyword = $1",
-            keyword,
-        )
+        if owner_user_id is None:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM aliases WHERE keyword = $1 AND owner_user_id = 0",
+                keyword,
+            )
+        else:
+            row = await conn.fetchrow(
+                """SELECT user_id
+                   FROM aliases
+                   WHERE keyword = $1
+                    AND owner_user_id IN (0, $2)
+                   ORDER BY (owner_user_id = $2) DESC
+                   LIMIT 1""",
+                keyword,
+                owner_user_id,
+            )
     finally:
         await conn.close()
     return row["user_id"] if row else None
 
 
-async def list_aliases() -> list[tuple[str, int]]:
+async def list_aliases(owner_user_id: Optional[int] = None) -> list[tuple[str, int]]:
     """Return all (keyword, user_id) pairs sorted by keyword."""
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
-        rows = await conn.fetch(
-            "SELECT keyword, user_id FROM aliases ORDER BY keyword"
-        )
+        if owner_user_id is None:
+            rows = await conn.fetch(
+                "SELECT keyword, user_id FROM aliases WHERE owner_user_id = 0 ORDER BY keyword"
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT DISTINCT ON (keyword) keyword, user_id
+                   FROM aliases
+                   WHERE owner_user_id IN (0, $1)
+                   ORDER BY keyword, (owner_user_id = $1) DESC""",
+                owner_user_id,
+            )
     finally:
         await conn.close()
     return [(row["keyword"], row["user_id"]) for row in rows]
