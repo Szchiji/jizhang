@@ -66,6 +66,7 @@ python bot.py
 | `/start` | 所有人 | 欢迎信息与用法说明 |
 | `/bindid <关键词> <用户ID>` | 管理员 | 将转发来源名称绑定到 Telegram 用户 ID |
 | `/listaliases` | 管理员 | 查看所有关键词别名 |
+| `/clearuser <用户ID>` | 管理员 | 清空该用户的所有记账记录 |
 | `/stats` | 所有人 | 查看本月入账统计 |
 
 ---

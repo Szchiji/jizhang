@@ -97,6 +97,19 @@ async def insert_entry(
         return False
 
 
+async def clear_entries_by_forward_uid(forward_uid: int) -> int:
+    """Delete all entries matching *forward_uid* and return deleted count."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM entries WHERE forward_uid = $1",
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1])
+
+
 # ── Alias operations ───────────────────────────────────────────────────────────
 
 

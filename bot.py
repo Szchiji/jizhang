@@ -31,6 +31,7 @@ from telegram.ext import (
 
 import config
 from db import (
+    clear_entries_by_forward_uid,
     get_alias,
     get_daily_stats,
     get_monthly_stats,
@@ -171,6 +172,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📋 <b>管理命令（仅管理员）：</b>\n"
         "/bindid &lt;关键词&gt; &lt;用户ID&gt; — 绑定关键词到用户\n"
         "/listaliases — 查看所有关键词别名\n"
+        "/clearuser &lt;用户ID&gt; — 清空该用户所有记账\n"
         "/stats — 当月入账统计",
         parse_mode=ParseMode.HTML,
     )
@@ -216,6 +218,32 @@ async def cmd_listaliases(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lines = [f"• <code>{kw}</code> → <code>{uid}</code>" for kw, uid in aliases]
     await update.message.reply_text(
         "📋 <b>别名列表</b>\n" + "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_clearuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("❌ 无权限访问")
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 仅管理员可使用此命令")
+        return
+
+    args = context.args or []
+    if len(args) < 1:
+        await update.message.reply_text("用法：/clearuser &lt;用户ID&gt;", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        forward_uid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ 用户ID 必须是整数")
+        return
+
+    deleted = await clear_entries_by_forward_uid(forward_uid)
+    await update.message.reply_text(
+        f"✅ 已清空用户 <code>{forward_uid}</code> 的记账，共删除 <b>{deleted}</b> 条",
         parse_mode=ParseMode.HTML,
     )
 
@@ -482,6 +510,7 @@ def main() -> None:
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("bindid", cmd_bindid))
         app.add_handler(CommandHandler("listaliases", cmd_listaliases))
+        app.add_handler(CommandHandler("clearuser", cmd_clearuser))
         app.add_handler(CommandHandler("stats", cmd_stats))
 
         # Forward message handler (text or caption)
