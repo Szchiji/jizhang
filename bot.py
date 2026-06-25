@@ -118,6 +118,7 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("➕ 绑定项目关键词", callback_data="menu:bindproject"),
                 InlineKeyboardButton("📋 查看项目关键词", callback_data="menu:listprojects"),
             ],
+            [InlineKeyboardButton("🧹 清空我的记账", callback_data="menu:clearself")],
             [
                 InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
                 InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
@@ -602,7 +603,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if (
             not update.effective_chat
             or update.effective_chat.type != "private"
-            or (not is_admin and action not in {"listprojects", "bindproject"})
+            or (not is_admin and action not in {"listprojects", "bindproject", "clearself"})
         ):
             await query.edit_message_text("❌ 当前操作仅管理员可在私聊中执行")
             return
@@ -662,6 +663,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _clear_flow(context)
             context.user_data["flow_action"] = "bindproject_keyword"
             await query.edit_message_text("请输入关键词", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "clearself":
+            _clear_flow(context)
+            deleted = await clear_entries_by_forward_uid(update.effective_user.id)
+            await query.edit_message_text(
+                f"✅ 已清空你自己的记账，共删除 <b>{deleted}</b> 条",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(False),
+            )
             return
 
         if action == "clearuser":
