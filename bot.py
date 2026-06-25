@@ -84,13 +84,40 @@ def _is_allowed(update: Update) -> bool:
     return True
 
 
-def _permission_keyboard() -> InlineKeyboardMarkup:
+def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
+    if is_admin:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("➕ 绑定用户关键词", callback_data="menu:bindid"),
+                    InlineKeyboardButton("📋 查看用户关键词", callback_data="menu:listaliases"),
+                ],
+                [
+                    InlineKeyboardButton("➕ 绑定项目关键词", callback_data="menu:bindproject"),
+                    InlineKeyboardButton("📋 查看项目关键词", callback_data="menu:listprojects"),
+                ],
+                [
+                    InlineKeyboardButton("🧹 清空用户记账", callback_data="menu:clearuser"),
+                    InlineKeyboardButton("🧹 清空用户项目记账", callback_data="menu:clearuserproject"),
+                ],
+                [
+                    InlineKeyboardButton("➕ 添加可用用户", callback_data="menu:allowadd"),
+                    InlineKeyboardButton("➖ 删除可用用户", callback_data="menu:allowremove"),
+                ],
+                [
+                    InlineKeyboardButton("📋 查看可用用户列表", callback_data="menu:allowlist"),
+                ],
+                [
+                    InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
+                    InlineKeyboardButton("📊 按用户统计", callback_data="menu:statsuser"),
+                ],
+                [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
+            ]
+        )
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("➕ 添加可用用户", callback_data="perm:add")],
-            [InlineKeyboardButton("➖ 删除可用用户", callback_data="perm:remove")],
-            [InlineKeyboardButton("📋 查看用户列表", callback_data="perm:list")],
-            [InlineKeyboardButton("❌ 取消操作", callback_data="perm:cancel")],
+            [InlineKeyboardButton("📊 本月统计", callback_data="menu:stats")],
+            [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
         ]
     )
 
@@ -100,6 +127,32 @@ def _fmt_allowed_user_ids() -> str:
         return "（未配置，当前不限制用户白名单）"
     ids = sorted(runtime_allowed_user_ids)
     return "\n".join(f"• <code>{uid}</code>" for uid in ids)
+
+
+def _cancel_flow_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")]]
+    )
+
+
+def _menu_text(is_admin: bool) -> str:
+    base = (
+        "👋 <b>记账机器人</b>\n\n"
+        "📌 将消息转发给我即可自动记账。\n"
+        "📌 所有功能请使用下方内联按钮操作。"
+    )
+    if is_admin:
+        return base + "\n\n🔐 当前身份：管理员"
+    return base
+
+
+def _clear_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        "flow_action",
+        "flow_keyword",
+        "flow_user_id",
+    ):
+        context.user_data.pop(key, None)
 
 
 # ── Forward-message helpers ────────────────────────────────────────────────────
@@ -193,259 +246,224 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    text = (
-        "👋 <b>记账机器人</b>\n\n"
-        "📌 使用方法：把消息 <b>转发</b> 给我，我会自动识别金额并记账。\n\n"
-        "📋 <b>管理命令（仅管理员）：</b>\n"
-        "/bindid &lt;关键词&gt; &lt;用户ID&gt; — 绑定关键词到用户\n"
-        "/listaliases — 查看所有关键词别名\n"
-        "/bindproject &lt;关键词&gt; &lt;项目名&gt; — 绑定关键词到项目\n"
-        "/listprojects — 查看所有项目关键词\n"
-        "/clearuser &lt;用户ID&gt; — 清空该用户所有记账\n"
-        "/clearuserproject &lt;用户ID&gt; &lt;项目名&gt; — 清空该用户在项目下的记账\n"
-        "/stats [用户ID] — 查看当月统计（可按用户）"
-    )
+    _clear_flow(context)
     message = update.message
-    if (
-        update.effective_chat
-        and update.effective_chat.type == "private"
-        and update.effective_user
-        and _is_admin(update.effective_user.id)
-    ):
-        text += "\n\n🔐 管理员可直接使用下方按钮管理可用用户权限。"
-        await message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=_permission_keyboard(),
-        )
-        return
-    await message.reply_text(text, parse_mode=ParseMode.HTML)
+    is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
+    await message.reply_text(
+        _menu_text(is_admin),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_main_menu_keyboard(is_admin),
+    )
+
+
+async def _reply_inline_only(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_flow(context)
+    is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
+    await update.message.reply_text(
+        "请使用内联按钮完成操作：先发送 /start 打开主菜单。",
+        reply_markup=_main_menu_keyboard(is_admin),
+    )
 
 
 async def cmd_bindid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    args = context.args or []
-    if len(args) < 2:
-        await update.message.reply_text("用法：/bindid &lt;关键词&gt; &lt;用户ID&gt;", parse_mode=ParseMode.HTML)
-        return
-
-    keyword = args[0]
-    try:
-        user_id = int(args[1])
-    except ValueError:
-        await update.message.reply_text("❌ 用户ID 必须是整数")
-        return
-
-    await set_alias(keyword, user_id, update.effective_user.id)
-    await update.message.reply_text(f"✅ 已绑定：<code>{keyword}</code> → <code>{user_id}</code>", parse_mode=ParseMode.HTML)
+    await _reply_inline_only(update, context)
 
 
 async def cmd_listaliases(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    aliases = await list_aliases()
-    if not aliases:
-        await update.message.reply_text("暂无别名配置")
-        return
-
-    lines = [f"• <code>{kw}</code> → <code>{uid}</code>" for kw, uid in aliases]
-    await update.message.reply_text(
-        "📋 <b>别名列表</b>\n" + "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-    )
+    await _reply_inline_only(update, context)
 
 
 async def cmd_bindproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    args = context.args or []
-    if len(args) < 2:
-        await update.message.reply_text("用法：/bindproject &lt;关键词&gt; &lt;项目名&gt;", parse_mode=ParseMode.HTML)
-        return
-
-    keyword = args[0]
-    project_name = " ".join(args[1:]).strip()
-    if not project_name:
-        await update.message.reply_text("❌ 项目名不能为空")
-        return
-
-    await set_project_alias(keyword, project_name, update.effective_user.id)
-    await update.message.reply_text(
-        f"✅ 已绑定项目关键词：<code>{keyword}</code> → <code>{project_name}</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    await _reply_inline_only(update, context)
 
 
 async def cmd_listprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    aliases = await list_project_aliases()
-    if not aliases:
-        await update.message.reply_text("暂无项目关键词配置")
-        return
-
-    lines = [f"• <code>{kw}</code> → <code>{project}</code>" for kw, project in aliases]
-    await update.message.reply_text(
-        "📋 <b>项目关键词列表</b>\n" + "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-    )
+    await _reply_inline_only(update, context)
 
 
 async def cmd_clearuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    args = context.args or []
-    if len(args) < 1:
-        await update.message.reply_text("用法：/clearuser &lt;用户ID&gt;", parse_mode=ParseMode.HTML)
-        return
-
-    try:
-        forward_uid = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ 用户ID 必须是整数")
-        return
-
-    deleted = await clear_entries_by_forward_uid(forward_uid)
-    await update.message.reply_text(
-        f"✅ 已清空用户 <code>{forward_uid}</code> 的记账，共删除 <b>{deleted}</b> 条",
-        parse_mode=ParseMode.HTML,
-    )
+    await _reply_inline_only(update, context)
 
 
 async def cmd_clearuserproject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-    if not _is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 仅管理员可使用此命令")
-        return
-
-    args = context.args or []
-    if len(args) < 2:
-        await update.message.reply_text(
-            "用法：/clearuserproject &lt;用户ID&gt; &lt;项目名&gt;",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    try:
-        forward_uid = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ 用户ID 必须是整数")
-        return
-
-    project_name = " ".join(args[1:]).strip()
-    if not project_name:
-        await update.message.reply_text("❌ 项目名不能为空")
-        return
-
-    deleted = await clear_entries_by_forward_uid_and_project(forward_uid, project_name)
-    await update.message.reply_text(
-        f"✅ 已清空用户 <code>{forward_uid}</code> 在项目 <code>{project_name}</code> 的记账，共删除 <b>{deleted}</b> 条",
-        parse_mode=ParseMode.HTML,
-    )
+    await _reply_inline_only(update, context)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
         return
-
-    now = datetime.now(config.TZ)
-    args = context.args or []
-    if len(args) > 1:
-        await update.message.reply_text("用法：/stats [用户ID]", parse_mode=ParseMode.HTML)
-        return
-    if args:
-        if not _is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ 仅管理员可按用户查看统计")
-            return
-        try:
-            forward_uid = int(args[0])
-        except ValueError:
-            await update.message.reply_text("❌ 用户ID 必须是整数")
-            return
-
-        stats = await get_monthly_stats_for_user(now.year, now.month, forward_uid)
-        text = _fmt_monthly_user(now.year, now.month, forward_uid, stats)
-    else:
-        stats = await get_monthly_stats(now.year, now.month)
-        text = _fmt_monthly(now.year, now.month, stats)
-
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await _reply_inline_only(update, context)
 
 
-async def handle_private_permission_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_private_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         await update.message.reply_text("❌ 无权限访问")
-        return
-    if not update.effective_user or not _is_admin(update.effective_user.id):
         return
     if not update.effective_chat or update.effective_chat.type != "private":
         return
 
-    action = context.user_data.get("permission_action")
-    if action not in {"add", "remove"}:
+    action = context.user_data.get("flow_action")
+    if not action:
+        return
+
+    is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
+    if not is_admin:
+        _clear_flow(context)
+        await update.message.reply_text("❌ 仅管理员可执行该操作")
         return
 
     raw = (update.message.text or "").strip()
     if not raw:
-        await update.message.reply_text("❌ 请输入用户ID")
-        return
-    try:
-        target_uid = int(raw)
-    except ValueError:
-        await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+        await update.message.reply_text("❌ 输入不能为空，请重试")
         return
 
-    context.user_data.pop("permission_action", None)
-    if action == "add":
+    if action == "bindid_keyword":
+        context.user_data["flow_keyword"] = raw
+        context.user_data["flow_action"] = "bindid_user"
+        await update.message.reply_text("请输入要绑定的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+        return
+
+    if action == "bindid_user":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
+        keyword = context.user_data.get("flow_keyword", "").strip()
+        await set_alias(keyword, target_uid, update.effective_user.id)
+        _clear_flow(context)
+        await update.message.reply_text(
+            f"✅ 已绑定：<code>{keyword}</code> → <code>{target_uid}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
+
+    if action == "bindproject_keyword":
+        context.user_data["flow_keyword"] = raw
+        context.user_data["flow_action"] = "bindproject_name"
+        await update.message.reply_text("请输入项目名", reply_markup=_cancel_flow_keyboard())
+        return
+
+    if action == "bindproject_name":
+        keyword = context.user_data.get("flow_keyword", "").strip()
+        await set_project_alias(keyword, raw, update.effective_user.id)
+        _clear_flow(context)
+        await update.message.reply_text(
+            f"✅ 已绑定项目关键词：<code>{keyword}</code> → <code>{raw}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
+
+    if action == "clearuser_uid":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
+        deleted = await clear_entries_by_forward_uid(target_uid)
+        _clear_flow(context)
+        await update.message.reply_text(
+            f"✅ 已清空用户 <code>{target_uid}</code> 的记账，共删除 <b>{deleted}</b> 条",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
+
+    if action == "clearuserproject_uid":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
+        context.user_data["flow_user_id"] = target_uid
+        context.user_data["flow_action"] = "clearuserproject_name"
+        await update.message.reply_text("请输入项目名", reply_markup=_cancel_flow_keyboard())
+        return
+
+    if action == "clearuserproject_name":
+        target_uid = context.user_data.get("flow_user_id")
+        deleted = await clear_entries_by_forward_uid_and_project(target_uid, raw)
+        _clear_flow(context)
+        await update.message.reply_text(
+            f"✅ 已清空用户 <code>{target_uid}</code> 在项目 <code>{raw}</code> 的记账，共删除 <b>{deleted}</b> 条",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
+
+    if action == "allow_add":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
         await upsert_allowed_user(target_uid, update.effective_user.id)
         runtime_allowed_user_ids.add(target_uid)
+        _clear_flow(context)
         await update.message.reply_text(
             f"✅ 已添加可用用户：<code>{target_uid}</code>",
             parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
         )
-    else:
+        return
+
+    if action == "allow_remove":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
         removed = await remove_allowed_user(target_uid)
         runtime_allowed_user_ids.discard(target_uid)
-        if removed:
-            msg = f"✅ 已删除可用用户：<code>{target_uid}</code>"
-        else:
-            msg = f"ℹ️ 用户 <code>{target_uid}</code> 不在可用列表中，已保持现状"
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        _clear_flow(context)
+        msg = (
+            f"✅ 已删除可用用户：<code>{target_uid}</code>"
+            if removed
+            else f"ℹ️ 用户 <code>{target_uid}</code> 不在可用列表中，已保持现状"
+        )
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
 
-    await update.message.reply_text(
-        "📋 <b>当前可用用户列表</b>\n" + _fmt_allowed_user_ids(),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_permission_keyboard(),
-    )
+    if action == "stats_user":
+        try:
+            target_uid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 用户ID 必须是整数，请重新输入")
+            return
+        now = datetime.now(config.TZ)
+        stats = await get_monthly_stats_for_user(now.year, now.month, target_uid)
+        _clear_flow(context)
+        await update.message.reply_text(
+            _fmt_monthly_user(now.year, now.month, target_uid, stats),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(True),
+        )
+        return
 
 
 # ── Forward handler ────────────────────────────────────────────────────────────
@@ -521,41 +539,124 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ 无权限访问")
         return
 
-    if query.data.startswith("perm:"):
+    if query.data.startswith("menu:"):
+        is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
+        action = query.data.split(":", 1)[1]
+
+        if action == "home":
+            _clear_flow(context)
+            await query.edit_message_text(
+                _menu_text(is_admin),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(is_admin),
+            )
+            return
+
+        if action == "stats":
+            _clear_flow(context)
+            now = datetime.now(config.TZ)
+            stats = await get_monthly_stats(now.year, now.month)
+            await query.edit_message_text(
+                _fmt_monthly(now.year, now.month, stats),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(is_admin),
+            )
+            return
+
         if (
-            not update.effective_user
-            or not _is_admin(update.effective_user.id)
+            not is_admin
             or not update.effective_chat
             or update.effective_chat.type != "private"
         ):
-            await query.edit_message_text("❌ 仅管理员可在私聊中管理用户权限")
+            await query.edit_message_text("❌ 仅管理员可在私聊中执行该操作")
             return
 
-        action = query.data.split(":", 1)[1]
-        if action == "add":
-            context.user_data["permission_action"] = "add"
-            await query.edit_message_text("请发送要添加的用户ID（整数）")
+        if action == "listaliases":
+            _clear_flow(context)
+            aliases = await list_aliases()
+            text = (
+                "暂无别名配置"
+                if not aliases
+                else "📋 <b>别名列表</b>\n" + "\n".join(
+                    f"• <code>{kw}</code> → <code>{uid}</code>" for kw, uid in aliases
+                )
+            )
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(True),
+            )
             return
-        if action == "remove":
-            context.user_data["permission_action"] = "remove"
-            await query.edit_message_text("请发送要删除的用户ID（整数）")
+
+        if action == "listprojects":
+            _clear_flow(context)
+            projects = await list_project_aliases()
+            text = (
+                "暂无项目关键词配置"
+                if not projects
+                else "📋 <b>项目关键词列表</b>\n" + "\n".join(
+                    f"• <code>{kw}</code> → <code>{project}</code>" for kw, project in projects
+                )
+            )
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(True),
+            )
             return
-        if action == "list":
-            context.user_data.pop("permission_action", None)
+
+        if action == "allowlist":
+            _clear_flow(context)
             await query.edit_message_text(
                 "📋 <b>当前可用用户列表</b>\n" + _fmt_allowed_user_ids(),
                 parse_mode=ParseMode.HTML,
-                reply_markup=_permission_keyboard(),
+                reply_markup=_main_menu_keyboard(True),
             )
             return
-        if action == "cancel":
-            context.user_data.pop("permission_action", None)
-            await query.edit_message_text(
-                "✅ 已取消操作。可继续使用下方按钮管理权限。",
-                reply_markup=_permission_keyboard(),
-            )
+
+        if action == "bindid":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "bindid_keyword"
+            await query.edit_message_text("请输入关键词", reply_markup=_cancel_flow_keyboard())
             return
-        await query.edit_message_text("❌ 无效操作")
+
+        if action == "bindproject":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "bindproject_keyword"
+            await query.edit_message_text("请输入关键词", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "clearuser":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "clearuser_uid"
+            await query.edit_message_text("请输入要清空的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "clearuserproject":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "clearuserproject_uid"
+            await query.edit_message_text("请输入要清空的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "allowadd":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "allow_add"
+            await query.edit_message_text("请输入要添加的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "allowremove":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "allow_remove"
+            await query.edit_message_text("请输入要删除的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "statsuser":
+            _clear_flow(context)
+            context.user_data["flow_action"] = "stats_user"
+            await query.edit_message_text("请输入要查询统计的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        await query.edit_message_text("❌ 无效操作", reply_markup=_main_menu_keyboard(True))
         return
 
     if query.data == "amt:cancel":
@@ -796,12 +897,12 @@ def main() -> None:
         app.add_handler(
             MessageHandler(
                 filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
-                handle_private_permission_input,
+                handle_private_text_input,
             )
         )
 
         # Inline-keyboard callbacks
-        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|perm):"))
+        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))
         app.add_error_handler(_on_error)
 
         # Daily report at 00:00 local time
