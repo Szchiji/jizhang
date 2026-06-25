@@ -150,6 +150,20 @@ async def init_db() -> None:
                 created_at TIMESTAMPTZ NOT NULL
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS report_schedules (
+                user_id BIGINT PRIMARY KEY,
+                daily_time TEXT NOT NULL,
+                monthly_time TEXT NOT NULL,
+                monthly_day INT NOT NULL,
+                daily_last_sent DATE,
+                monthly_last_sent TEXT,
+                updated_by BIGINT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                CONSTRAINT report_schedules_monthly_day_check
+                    CHECK (monthly_day BETWEEN 1 AND 31)
+            )
+        """)
     finally:
         await conn.close()
     logger.info("Database ready at %s", config.DATABASE_URL)
@@ -540,6 +554,127 @@ async def list_allowed_chats() -> list[int]:
     finally:
         await conn.close()
     return [int(row["chat_id"]) for row in rows]
+
+
+async def set_report_schedule(
+    user_id: int,
+    daily_time: str,
+    monthly_time: str,
+    monthly_day: int,
+    updated_by: int,
+) -> None:
+    """Upsert one user's report schedule settings."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO report_schedules
+               (user_id, daily_time, monthly_time, monthly_day, updated_by, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT(user_id) DO UPDATE
+               SET daily_time = EXCLUDED.daily_time,
+                   monthly_time = EXCLUDED.monthly_time,
+                   monthly_day = EXCLUDED.monthly_day,
+                   updated_by = EXCLUDED.updated_by,
+                   updated_at = EXCLUDED.updated_at""",
+            user_id,
+            daily_time,
+            monthly_time,
+            monthly_day,
+            updated_by,
+            datetime.now(config.TZ),
+        )
+    finally:
+        await conn.close()
+
+
+async def get_report_schedule(user_id: int) -> Optional[dict]:
+    """Return one user's report schedule settings."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT user_id, daily_time, monthly_time, monthly_day,
+                      daily_last_sent, monthly_last_sent
+               FROM report_schedules
+               WHERE user_id = $1""",
+            user_id,
+        )
+    finally:
+        await conn.close()
+    if not row:
+        return None
+    return {
+        "user_id": int(row["user_id"]),
+        "daily_time": row["daily_time"],
+        "monthly_time": row["monthly_time"],
+        "monthly_day": int(row["monthly_day"]),
+        "daily_last_sent": row["daily_last_sent"],
+        "monthly_last_sent": row["monthly_last_sent"],
+    }
+
+
+async def list_report_schedules(user_ids: Optional[list[int]] = None) -> dict[int, dict]:
+    """Return report schedule settings keyed by user_id."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        if user_ids is None:
+            rows = await conn.fetch(
+                """SELECT user_id, daily_time, monthly_time, monthly_day,
+                          daily_last_sent, monthly_last_sent
+                   FROM report_schedules"""
+            )
+        else:
+            if not user_ids:
+                return {}
+            rows = await conn.fetch(
+                """SELECT user_id, daily_time, monthly_time, monthly_day,
+                          daily_last_sent, monthly_last_sent
+                   FROM report_schedules
+                   WHERE user_id = ANY($1::BIGINT[])""",
+                user_ids,
+            )
+    finally:
+        await conn.close()
+    return {
+        int(row["user_id"]): {
+            "user_id": int(row["user_id"]),
+            "daily_time": row["daily_time"],
+            "monthly_time": row["monthly_time"],
+            "monthly_day": int(row["monthly_day"]),
+            "daily_last_sent": row["daily_last_sent"],
+            "monthly_last_sent": row["monthly_last_sent"],
+        }
+        for row in rows
+    }
+
+
+async def mark_report_daily_sent(user_id: int, target_date: date) -> None:
+    """Persist the last date when daily report was sent."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """UPDATE report_schedules
+               SET daily_last_sent = $2
+               WHERE user_id = $1""",
+            user_id,
+            target_date,
+        )
+    finally:
+        await conn.close()
+
+
+async def mark_report_monthly_sent(user_id: int, period: str) -> None:
+    """Persist the last YYYY-MM period when monthly report was sent."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """UPDATE report_schedules
+               SET monthly_last_sent = $2
+               WHERE user_id = $1""",
+            user_id,
+            period,
+        )
+    finally:
+        await conn.close()
 
 
 # ── Statistics ─────────────────────────────────────────────────────────────────

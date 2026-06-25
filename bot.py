@@ -35,6 +35,10 @@ from db import (
     clear_entries_by_forward_uid_and_project,
     clear_entries_by_forward_uid,
     list_allowed_chats,
+    get_report_schedule,
+    list_report_schedules,
+    mark_report_daily_sent,
+    mark_report_monthly_sent,
     get_daily_stats_for_user,
     get_alias,
     get_alias_keyword_for_user,
@@ -55,6 +59,7 @@ from db import (
     remove_project_alias,
     resolve_project_by_text,
     set_alias,
+    set_report_schedule,
     set_project_alias,
     upsert_allowed_chat,
     upsert_allowed_user,
@@ -167,6 +172,7 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
                     InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
                     InlineKeyboardButton("🔎 日期查账", callback_data="menu:datestats"),
                 ],
+                [InlineKeyboardButton("⏰ 设置推送时间", callback_data="menu:pushtime")],
                 [
                     InlineKeyboardButton("📊 按用户统计", callback_data="menu:statsuser"),
                 ],
@@ -192,6 +198,7 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
                 InlineKeyboardButton("🔎 日期查账", callback_data="menu:datestats"),
             ],
+            [InlineKeyboardButton("⏰ 设置推送时间", callback_data="menu:pushtime")],
             [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
         ]
     )
@@ -248,6 +255,8 @@ def _clear_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
         "flow_action",
         "flow_keyword",
         "flow_user_id",
+        "flow_daily_time",
+        "flow_monthly_time",
         "alias_delete_map",
         "project_delete_map",
     ):
@@ -333,6 +342,15 @@ def _parse_local_date(raw: str) -> Optional[date]:
             return datetime.strptime(normalized, "%Y-%m-%d").date()
         except ValueError:
             return None
+
+
+def _parse_hhmm(raw: str) -> Optional[str]:
+            value = raw.strip()
+            try:
+                parsed = datetime.strptime(value, "%H:%M")
+            except ValueError:
+                return None
+            return parsed.strftime("%H:%M")
     return None
 
 
@@ -515,6 +533,9 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         "delalias_keyword",
         "delproject_keyword",
         "stats_date",
+        "push_daily_time",
+        "push_monthly_time",
+        "push_monthly_day",
     }:
         _clear_flow(context)
         await update.message.reply_text("❌ 仅管理员可执行该操作")
@@ -711,6 +732,62 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    if action == "push_daily_time":
+        daily_time = _parse_hhmm(raw)
+        if not daily_time:
+            await update.message.reply_text("❌ 时间格式错误，请输入 HH:MM（如 21:00）")
+            return
+        context.user_data["flow_daily_time"] = daily_time
+        context.user_data["flow_action"] = "push_monthly_time"
+        await update.message.reply_text("请输入每月推送时间（HH:MM）", reply_markup=_cancel_flow_keyboard())
+        return
+
+    if action == "push_monthly_time":
+        monthly_time = _parse_hhmm(raw)
+        if not monthly_time:
+            await update.message.reply_text("❌ 时间格式错误，请输入 HH:MM（如 21:00）")
+            return
+        context.user_data["flow_monthly_time"] = monthly_time
+        context.user_data["flow_action"] = "push_monthly_day"
+        await update.message.reply_text("请输入每月推送日期（1-31）", reply_markup=_cancel_flow_keyboard())
+        return
+
+    if action == "push_monthly_day":
+        try:
+            monthly_day = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ 日期必须是 1-31 的整数，请重新输入")
+            return
+        if not (1 <= monthly_day <= 31):
+            await update.message.reply_text("❌ 日期必须在 1-31 之间，请重新输入")
+            return
+        daily_time = context.user_data.get("flow_daily_time")
+        monthly_time = context.user_data.get("flow_monthly_time")
+        if not daily_time or not monthly_time:
+            _clear_flow(context)
+            await update.message.reply_text(
+                "❌ 设置流程已过期，请重新点击“设置推送时间”",
+                reply_markup=_main_menu_keyboard(is_admin),
+            )
+            return
+        user_id = update.effective_user.id
+        await set_report_schedule(
+            user_id,
+            daily_time,
+            monthly_time,
+            monthly_day,
+            update.effective_user.id,
+        )
+        _clear_flow(context)
+        await update.message.reply_text(
+            "✅ 推送时间已更新：\n"
+            f"• 每日推送：<code>{daily_time}</code>\n"
+            f"• 每月推送：每月 <code>{monthly_day}</code> 日 <code>{monthly_time}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(is_admin),
+        )
+        return
+
 
 # ── Forward handler ────────────────────────────────────────────────────────────
 
@@ -887,6 +964,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "delalias",
                     "delproject",
                     "datestats",
+                    "pushtime",
                 }
             )
         ):
@@ -1050,6 +1128,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _clear_flow(context)
             context.user_data["flow_action"] = "stats_user"
             await query.edit_message_text("请输入要查询统计的用户ID（整数）", reply_markup=_cancel_flow_keyboard())
+            return
+
+        if action == "pushtime":
+            _clear_flow(context)
+            user_id = update.effective_user.id
+            schedule = await get_report_schedule(user_id)
+            daily_time = schedule["daily_time"] if schedule else config.DAILY_REPORT_TIME.strftime("%H:%M")
+            monthly_time = schedule["monthly_time"] if schedule else config.MONTHLY_REPORT_TIME.strftime("%H:%M")
+            monthly_day = schedule["monthly_day"] if schedule else config.MONTHLY_REPORT_DAY
+            context.user_data["flow_action"] = "push_daily_time"
+            await query.edit_message_text(
+                "⏰ <b>当前推送设置</b>\n"
+                f"• 每日推送：<code>{daily_time}</code>\n"
+                f"• 每月推送：每月 <code>{monthly_day}</code> 日 <code>{monthly_time}</code>\n\n"
+                "请输入新的每日推送时间（HH:MM）",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_cancel_flow_keyboard(),
+            )
             return
 
         await query.edit_message_text("❌ 无效操作", reply_markup=_main_menu_keyboard(is_admin))
@@ -1264,9 +1360,12 @@ async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
     today = now.date()
     global_daily = await get_daily_stats(today)
     recipient_ids = set(config.ADMIN_IDS) | set(runtime_allowed_user_ids)
+    custom_schedules = await list_report_schedules(list(recipient_ids))
     if config.REPORT_CHAT_ID:
         recipient_ids.add(config.REPORT_CHAT_ID)
     for chat_id in recipient_ids:
+        if chat_id in custom_schedules:
+            continue
         try:
             if _is_admin(chat_id) or chat_id == config.REPORT_CHAT_ID:
                 text = _fmt_daily(today, global_daily)
@@ -1292,9 +1391,12 @@ async def _job_monthly(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     global_monthly = await get_monthly_stats(now.year, now.month)
     recipient_ids = set(config.ADMIN_IDS) | set(runtime_allowed_user_ids)
+    custom_schedules = await list_report_schedules(list(recipient_ids))
     if config.REPORT_CHAT_ID:
         recipient_ids.add(config.REPORT_CHAT_ID)
     for chat_id in recipient_ids:
+        if chat_id in custom_schedules:
+            continue
         try:
             if _is_admin(chat_id) or chat_id == config.REPORT_CHAT_ID:
                 text = _fmt_monthly(now.year, now.month, global_monthly)
@@ -1308,6 +1410,64 @@ async def _job_monthly(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception:
             logger.warning("Failed to send monthly report to %s", chat_id, exc_info=True)
+
+
+async def _job_custom_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dispatch custom report schedules for admins/allowed users."""
+    now = datetime.now(config.TZ)
+    today = now.date()
+    current_time = now.strftime("%H:%M")
+    month_key = f"{now.year:04d}-{now.month:02d}"
+    month_last_day = calendar.monthrange(now.year, now.month)[1]
+
+    recipient_ids = sorted(set(config.ADMIN_IDS) | set(runtime_allowed_user_ids))
+    schedules = await list_report_schedules(recipient_ids)
+    if not schedules:
+        return
+
+    global_daily: Optional[dict] = None
+    global_monthly: Optional[dict] = None
+    for user_id, schedule in schedules.items():
+        try:
+            if (
+                schedule["daily_time"] == current_time
+                and schedule.get("daily_last_sent") != today
+            ):
+                if _is_admin(user_id):
+                    if global_daily is None:
+                        global_daily = await get_daily_stats(today)
+                    text = _fmt_daily(today, global_daily)
+                else:
+                    user_daily = await get_daily_stats_for_user(today, user_id)
+                    text = _fmt_daily_user(today, user_id, user_daily)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+                await mark_report_daily_sent(user_id, today)
+
+            target_day = min(schedule["monthly_day"], month_last_day)
+            if (
+                schedule["monthly_time"] == current_time
+                and now.day == target_day
+                and schedule.get("monthly_last_sent") != month_key
+            ):
+                if _is_admin(user_id):
+                    if global_monthly is None:
+                        global_monthly = await get_monthly_stats(now.year, now.month)
+                    text = _fmt_monthly(now.year, now.month, global_monthly)
+                else:
+                    user_monthly = await get_monthly_stats_for_user(now.year, now.month, user_id)
+                    text = _fmt_monthly_user(now.year, now.month, user_id, user_monthly)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+                await mark_report_monthly_sent(user_id, month_key)
+        except Exception:
+            logger.warning("Failed to send custom report to %s", user_id, exc_info=True)
 
 
 # ── Application setup ──────────────────────────────────────────────────────────
@@ -1370,6 +1530,7 @@ def main() -> None:
 
     app.job_queue.run_daily(_job_daily, time=config.DAILY_REPORT_TIME)
     app.job_queue.run_daily(_job_monthly, time=config.MONTHLY_REPORT_TIME)
+    app.job_queue.run_repeating(_job_custom_reports, interval=60, first=10)
 
     if config.WEBHOOK_URL:
         logger.info("Bot starting (webhook)…")
