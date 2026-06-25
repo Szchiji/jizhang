@@ -430,6 +430,15 @@ async def _post_shutdown(application: Application) -> None:
             await lock_conn.close()
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        logger.warning(
+            "Telegram polling conflict detected during restart overlap; retrying."
+        )
+        return
+    logger.exception("Unhandled Telegram error", exc_info=context.error)
+
+
 def main() -> None:
     app = (
         Application.builder()
@@ -455,6 +464,7 @@ def main() -> None:
 
     # Inline-keyboard callback for amount selection
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
+    app.add_error_handler(_on_error)
 
     # Daily report at 00:00 local time
     midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
