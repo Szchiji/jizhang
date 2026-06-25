@@ -44,7 +44,8 @@ def extract_amounts(text: str) -> list[float]:
     """Return candidate amounts from *text* in order of appearance.
 
     Numbers that overlap with date, time, phone or other non-monetary patterns
-    are silently discarded.  Only values in the range [0.01, 999 999] are kept.
+    are silently discarded. Leading signs/operators (e.g. ``-20``/``减20``) are
+    respected. Absolute values must remain in the range [0.01, 999 999].
     """
     if not text:
         return []
@@ -69,8 +70,17 @@ def extract_amounts(text: str) -> list[float]:
         except ValueError:
             continue
 
+        sign = 1.0
+        i = m.start() - 1
+        while i >= 0 and text[i].isspace():
+            i -= 1
+        if i >= 0 and text[i] in {"-", "－", "−", "﹣", "—", "–", "减"}:
+            sign = -1.0
+        elif i >= 0 and text[i] in {"+", "＋", "加"}:
+            sign = 1.0
+
         if 0.01 <= value <= 999_999:
-            amounts.append(value)
+            amounts.append(round(value * sign, 2))
 
     return amounts
 

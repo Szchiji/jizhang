@@ -163,6 +163,31 @@ async def insert_entry(
         return False
 
 
+async def get_running_total_for_source(
+    *,
+    forward_uid: Optional[int],
+    forward_name: Optional[str],
+) -> float:
+    """Return cumulative amount for a source user/name."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        if forward_uid is not None:
+            total = await conn.fetchval(
+                "SELECT COALESCE(SUM(amount), 0) FROM entries WHERE forward_uid = $1",
+                forward_uid,
+            )
+        elif forward_name:
+            total = await conn.fetchval(
+                "SELECT COALESCE(SUM(amount), 0) FROM entries WHERE forward_name = $1",
+                forward_name,
+            )
+        else:
+            total = 0
+    finally:
+        await conn.close()
+    return float(total or 0)
+
+
 async def clear_entries_by_forward_uid(forward_uid: int) -> int:
     """Delete all entries matching *forward_uid* and return deleted count."""
     conn = await asyncpg.connect(config.DATABASE_URL)
