@@ -187,8 +187,66 @@ def _clear_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
         "flow_action",
         "flow_keyword",
         "flow_user_id",
+        "alias_delete_map",
+        "project_delete_map",
     ):
         context.user_data.pop(key, None)
+
+
+async def _build_alias_list_view(
+    context: ContextTypes.DEFAULT_TYPE,
+    is_admin: bool,
+    current_user_id: int,
+) -> tuple[str, InlineKeyboardMarkup, dict[str, str]]:
+    aliases = await list_aliases(owner_user_id=None if is_admin else current_user_id)
+    lines: list[str] = []
+    delete_map: dict[str, str] = {}
+    buttons: list[list[InlineKeyboardButton]] = []
+    for index, (kw, uid) in enumerate(aliases):
+        nickname = await _get_user_nickname(context, uid)
+        lines.append(
+            f"• <code>{html.escape(kw)}</code> → {_fmt_uid_with_nickname(uid, nickname)}"
+        )
+        token = hashlib.sha1(f"{index}:{kw}".encode("utf-8")).hexdigest()[:10]
+        delete_map[token] = kw
+        button_kw = kw if len(kw) <= 12 else f"{kw[:12]}…"
+        buttons.append(
+            [InlineKeyboardButton(f"🗑 删除「{button_kw}」", callback_data=f"menu:delalias:{token}")]
+        )
+    buttons.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
+    text = (
+        "暂无用户关键词配置"
+        if not aliases
+        else "📋 <b>用户关键词列表</b>\n" + "\n".join(lines)
+    )
+    return text, InlineKeyboardMarkup(buttons), delete_map
+
+
+async def _build_project_list_view(
+    is_admin: bool,
+    current_user_id: int,
+) -> tuple[str, InlineKeyboardMarkup, dict[str, str]]:
+    projects = await list_project_aliases(owner_user_id=None if is_admin else current_user_id)
+    delete_map: dict[str, str] = {}
+    buttons: list[list[InlineKeyboardButton]] = []
+    for index, (kw, _project) in enumerate(projects):
+        token = hashlib.sha1(f"{index}:{kw}".encode("utf-8")).hexdigest()[:10]
+        delete_map[token] = kw
+        button_kw = kw if len(kw) <= 12 else f"{kw[:12]}…"
+        buttons.append(
+            [InlineKeyboardButton(f"🗑 删除「{button_kw}」", callback_data=f"menu:delproject:{token}")]
+        )
+    buttons.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
+    text = (
+        "暂无项目关键词配置"
+        if not projects
+        else "📋 <b>项目关键词列表</b>\n"
+        + "\n".join(
+            f"• <code>{html.escape(kw)}</code> → <code>{html.escape(project)}</code>"
+            for kw, project in projects
+        )
+    )
+    return text, InlineKeyboardMarkup(buttons), delete_map
 
 
 def _fmt_signed_amount(amount: float) -> str:
@@ -633,7 +691,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data.startswith("menu:"):
         is_admin = bool(update.effective_user and _is_admin(update.effective_user.id))
-        action = query.data.split(":", 1)[1]
+        raw_action = query.data.split(":", 1)[1]
+        action, action_arg = raw_action, None
+        if ":" in raw_action:
+            action, action_arg = raw_action.split(":", 1)
 
         if action == "home":
             _clear_flow(context)
@@ -698,22 +759,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "listaliases":
             _clear_flow(context)
-            aliases = await list_aliases(owner_user_id=None if is_admin else update.effective_user.id)
-            lines: list[str] = []
-            for kw, uid in aliases:
-                nickname = await _get_user_nickname(context, uid)
-                lines.append(f"• <code>{kw}</code> → {_fmt_uid_with_nickname(uid, nickname)}")
-            text = (
-                "暂无别名配置"
-                if not aliases
-                else "📋 <b>别名列表</b>\n" + "\n".join(lines)
+            text, list_actions, delete_map = await _build_alias_list_view(
+                context,
+                is_admin,
+                update.effective_user.id,
             )
-            list_actions = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("🗑 删除用户关键词", callback_data="menu:delalias")],
-                    [InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")],
-                ]
-            )
+            context.user_data["alias_delete_map"] = delete_map
             await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
@@ -723,24 +774,82 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "listprojects":
             _clear_flow(context)
-            projects = await list_project_aliases(
-                owner_user_id=None if is_admin else update.effective_user.id
+            text, list_actions, delete_map = await _build_project_list_view(
+                is_admin,
+                update.effective_user.id,
             )
-            text = (
-                "暂无项目关键词配置"
-                if not projects
-                else "📋 <b>项目关键词列表</b>\n" + "\n".join(
-                    f"• <code>{kw}</code> → <code>{project}</code>" for kw, project in projects
-                )
-            )
-            list_actions = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("🗑 删除项目关键词", callback_data="menu:delproject")],
-                    [InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")],
-                ]
-            )
+            context.user_data["project_delete_map"] = delete_map
             await query.edit_message_text(
                 text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=list_actions,
+            )
+            return
+
+        if action == "delalias":
+            if not action_arg:
+                await query.edit_message_text(
+                    "❌ 删除入口已过期，请重新打开“查看用户关键词”",
+                    reply_markup=_main_menu_keyboard(is_admin),
+                )
+                return
+            delete_map = context.user_data.get("alias_delete_map", {})
+            keyword = delete_map.get(action_arg)
+            if not keyword:
+                await query.edit_message_text(
+                    "❌ 删除项已过期，请重新打开“查看用户关键词”",
+                    reply_markup=_main_menu_keyboard(is_admin),
+                )
+                return
+            owner_user_id = 0 if is_admin else update.effective_user.id
+            removed = await remove_alias(keyword, owner_user_id=owner_user_id)
+            text, list_actions, new_map = await _build_alias_list_view(
+                context,
+                is_admin,
+                update.effective_user.id,
+            )
+            context.user_data["alias_delete_map"] = new_map
+            status = (
+                f"✅ 已删除用户关键词：<code>{html.escape(keyword)}</code>"
+                if removed
+                else f"ℹ️ 用户关键词 <code>{html.escape(keyword)}</code> 不存在，已保持现状"
+            )
+            await query.edit_message_text(
+                f"{status}\n\n{text}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=list_actions,
+            )
+            return
+
+        if action == "delproject":
+            if not action_arg:
+                await query.edit_message_text(
+                    "❌ 删除入口已过期，请重新打开“查看项目关键词”",
+                    reply_markup=_main_menu_keyboard(is_admin),
+                )
+                return
+            delete_map = context.user_data.get("project_delete_map", {})
+            keyword = delete_map.get(action_arg)
+            if not keyword:
+                await query.edit_message_text(
+                    "❌ 删除项已过期，请重新打开“查看项目关键词”",
+                    reply_markup=_main_menu_keyboard(is_admin),
+                )
+                return
+            owner_user_id = 0 if is_admin else update.effective_user.id
+            removed = await remove_project_alias(keyword, owner_user_id=owner_user_id)
+            text, list_actions, new_map = await _build_project_list_view(
+                is_admin,
+                update.effective_user.id,
+            )
+            context.user_data["project_delete_map"] = new_map
+            status = (
+                f"✅ 已删除项目关键词：<code>{html.escape(keyword)}</code>"
+                if removed
+                else f"ℹ️ 项目关键词 <code>{html.escape(keyword)}</code> 不存在，已保持现状"
+            )
+            await query.edit_message_text(
+                f"{status}\n\n{text}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=list_actions,
             )
@@ -765,18 +874,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _clear_flow(context)
             context.user_data["flow_action"] = "bindproject_keyword"
             await query.edit_message_text("请输入关键词", reply_markup=_cancel_flow_keyboard())
-            return
-
-        if action == "delalias":
-            _clear_flow(context)
-            context.user_data["flow_action"] = "delalias_keyword"
-            await query.edit_message_text("请输入要删除的用户关键词", reply_markup=_cancel_flow_keyboard())
-            return
-
-        if action == "delproject":
-            _clear_flow(context)
-            context.user_data["flow_action"] = "delproject_keyword"
-            await query.edit_message_text("请输入要删除的项目关键词", reply_markup=_cancel_flow_keyboard())
             return
 
         if action == "clearself":

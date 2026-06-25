@@ -307,10 +307,7 @@ async def list_aliases(owner_user_id: Optional[int] = None) -> list[tuple[str, i
             )
         else:
             rows = await conn.fetch(
-                """SELECT DISTINCT ON (keyword) keyword, user_id
-                   FROM aliases
-                   WHERE owner_user_id IN (0, $1)
-                   ORDER BY keyword, (owner_user_id = $1) DESC""",
+                "SELECT keyword, user_id FROM aliases WHERE owner_user_id = $1 ORDER BY keyword",
                 owner_user_id,
             )
     finally:
@@ -368,10 +365,7 @@ async def list_project_aliases(owner_user_id: Optional[int] = None) -> list[tupl
             )
         else:
             rows = await conn.fetch(
-                """SELECT DISTINCT ON (keyword) keyword, project_name
-                   FROM project_aliases
-                   WHERE owner_user_id IN (0, $1)
-                   ORDER BY keyword, (owner_user_id = $1) DESC""",
+                "SELECT keyword, project_name FROM project_aliases WHERE owner_user_id = $1 ORDER BY keyword",
                 owner_user_id,
             )
     finally:
