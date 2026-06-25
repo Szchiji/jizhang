@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
@@ -45,6 +46,10 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+class PollingLockNotAcquired(RuntimeError):
+    """Raised when another replica already owns the polling advisory lock."""
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -410,7 +415,7 @@ async def _post_init(application: Application) -> None:
     )
     if not locked:
         await lock_conn.close()
-        raise RuntimeError(
+        raise PollingLockNotAcquired(
             "another bot instance already holds the polling lock; "
             "stop duplicate replicas or set a different POLLING_LOCK_ID"
         )
@@ -440,43 +445,55 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    app = (
-        Application.builder()
-        .token(config.BOT_TOKEN)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
-    )
-
-    # Commands
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("bindid", cmd_bindid))
-    app.add_handler(CommandHandler("listaliases", cmd_listaliases))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-
-    # Forward message handler (text or caption)
-    app.add_handler(
-        MessageHandler(
-            filters.FORWARDED & (filters.TEXT | filters.CAPTION),
-            handle_forward,
+    retry_seconds = 30
+    while True:
+        app = (
+            Application.builder()
+            .token(config.BOT_TOKEN)
+            .post_init(_post_init)
+            .post_shutdown(_post_shutdown)
+            .build()
         )
-    )
 
-    # Inline-keyboard callback for amount selection
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
-    app.add_error_handler(_on_error)
+        # Commands
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("bindid", cmd_bindid))
+        app.add_handler(CommandHandler("listaliases", cmd_listaliases))
+        app.add_handler(CommandHandler("stats", cmd_stats))
 
-    # Daily report at 00:00 local time
-    midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
-    app.job_queue.run_daily(_job_daily, time=midnight)
-
-    logger.info("Bot starting (polling)…")
-    try:
-        app.run_polling(drop_pending_updates=True)
-    except Conflict:
-        logger.exception(
-            "Telegram polling conflict: only one bot instance can call getUpdates."
+        # Forward message handler (text or caption)
+        app.add_handler(
+            MessageHandler(
+                filters.FORWARDED & (filters.TEXT | filters.CAPTION),
+                handle_forward,
+            )
         )
+
+        # Inline-keyboard callback for amount selection
+        app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^amt:"))
+        app.add_error_handler(_on_error)
+
+        # Daily report at 00:00 local time
+        midnight = dt_time(0, 0, 0, tzinfo=config.TZ)
+        app.job_queue.run_daily(_job_daily, time=midnight)
+
+        logger.info("Bot starting (polling)…")
+        try:
+            app.run_polling(drop_pending_updates=True)
+            return
+        except PollingLockNotAcquired:
+            logger.warning(
+                "Polling lock unavailable; another replica is active. Retrying in %s seconds.",
+                retry_seconds,
+            )
+            time.sleep(retry_seconds)
+        except Conflict:
+            logger.exception(
+                "Telegram polling conflict: only one bot instance can call getUpdates. "
+                "Retrying in %s seconds.",
+                retry_seconds,
+            )
+            time.sleep(retry_seconds)
 
 
 if __name__ == "__main__":
