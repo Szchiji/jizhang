@@ -635,3 +635,80 @@ async def get_daily_stats_for_user(target_date: date, forward_uid: int) -> dict:
 
     projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
     return {"count": count, "total": total, "projects": projects}
+
+
+async def get_range_stats(start_date: date, end_date: date) -> dict:
+    """Return bookkeeping statistics for [start_date, end_date] (local date)."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2""",
+            start_date,
+            end_date,
+        )
+        count, total = row[0], float(row[1])
+
+        persons_rows = await conn.fetch(
+            """SELECT COALESCE(forward_name, '未知') AS name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+               GROUP BY forward_uid, forward_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
+        )
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
+        )
+    finally:
+        await conn.close()
+
+    persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "persons": persons, "projects": projects}
+
+
+async def get_range_stats_for_user(start_date: date, end_date: date, forward_uid: int) -> dict:
+    """Return bookkeeping statistics for one user in [start_date, end_date]."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+                 AND forward_uid = $3""",
+            start_date,
+            end_date,
+            forward_uid,
+        )
+        count, total = row[0], float(row[1])
+
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+                 AND forward_uid = $3
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "projects": projects}
