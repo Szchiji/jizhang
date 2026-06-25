@@ -342,16 +342,16 @@ def _parse_local_date(raw: str) -> Optional[date]:
             return datetime.strptime(normalized, "%Y-%m-%d").date()
         except ValueError:
             return None
+    return None
 
 
 def _parse_hhmm(raw: str) -> Optional[str]:
-            value = raw.strip()
-            try:
-                parsed = datetime.strptime(value, "%H:%M")
-            except ValueError:
-                return None
-            return parsed.strftime("%H:%M")
-    return None
+    value = raw.strip()
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
 
 
 # ── Forward-message helpers ────────────────────────────────────────────────────
