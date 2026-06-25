@@ -77,6 +77,32 @@ python bot.py
 4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 web 进程。  
    启动后机器人会自动注册 webhook，无需轮询模式。
 
+### 环境变量详解（按当前代码）
+
+| 变量 | 是否必填 | 默认值 | 示例 | 说明 |
+|------|----------|--------|------|------|
+| `BOT_TOKEN` | 是 | 无 | `123456:ABC...` | Telegram 机器人令牌，缺失会直接启动失败。 |
+| `ADMIN_IDS` | 建议 | 空 | `123456789,987654321` | 管理员用户 ID 列表（逗号分隔）。 |
+| `ALLOWED_USER_IDS` | 否 | 空 | `123456789` | 用户白名单；空表示不限制。 |
+| `ALLOWED_CHAT_IDS` | 否 | 空 | `-1001234567890` | 群聊白名单；空表示不限制。 |
+| `REPORT_CHAT_ID` | 否 | `0` | `-1001234567890` | 日报/月报推送目标；`0` 表示关闭推送。 |
+| `DATABASE_URL` | 建议 | 自动回退 | `postgresql://postgres@host:5432/db` | 主数据库连接串；优先级最高。 |
+| `DATABASE_PRIVATE_URL` | 否 | 空 | `postgresql://...` | 当 `DATABASE_URL` 缺失时可作为回退。 |
+| `DATABASE_PUBLIC_URL` | 否 | 空 | `postgresql://...` | 当上面两项缺失时可作为回退。 |
+| `POSTGRES_URL` | 否 | 空 | `postgresql://...` | 兼容旧变量名，继续回退。 |
+| `POSTGRESQL_URL` | 否 | 空 | `postgresql://...` | 最后一个数据库变量回退项。 |
+| `TZ` | 否 | `Asia/Shanghai` | `Asia/Shanghai` | 时区配置（影响日期统计与定时任务）。 |
+| `RAILWAY_PUBLIC_DOMAIN` | 否 | 空 | `xxx.up.railway.app` | Railway 自动注入；用于推导默认 `WEBHOOK_BASE_URL`。 |
+| `WEBHOOK_BASE_URL` | 是（生产） | 若有域名则自动推导，否则空 | `https://xxx.up.railway.app` | Webhook 公网基地址；生产环境建议显式设置。 |
+| `WEBHOOK_PATH` | 否 | `/telegram/webhook` | `/telegram/webhook` | Webhook 路径；若未以 `/` 开头会自动补齐。 |
+| `WEBHOOK_SECRET_TOKEN` | 否（建议） | 空 | `a-long-random-token` | Telegram webhook 请求校验密钥。 |
+| `WEBHOOK_LISTEN` | 否 | `0.0.0.0` | `0.0.0.0` | Web 服务器监听地址。 |
+| `PORT` | 否 | `8080`（优先于 `WEBHOOK_PORT`） | `8080` | Railway 通常自动注入；作为 webhook 服务端口。 |
+| `WEBHOOK_PORT` | 否 | `8080`（仅当 `PORT` 缺失时生效） | `8080` | 本地或自托管时可手动指定端口。 |
+| `DEFAULT_PROJECT_NAME` | 否 | `默认项目` | `默认项目` | 无法识别项目时写入的项目名。 |
+
+> 数据库连接串最终解析顺序：`DATABASE_URL` → `DATABASE_PRIVATE_URL` → `DATABASE_PUBLIC_URL` → `POSTGRES_URL` → `POSTGRESQL_URL` → `postgresql://localhost/jizhang`。
+
 ---
 
 ## 命令入口
