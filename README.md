@@ -48,11 +48,10 @@ python bot.py
    | `REPORT_CHAT_ID` | 接收每日/每月报表的 chat ID（0=不推送） |
    | `ALLOWED_USER_IDS` | 允许使用的用户 ID 白名单（空=不限制） |
    | `ALLOWED_CHAT_IDS` | 允许使用的群组 ID 白名单（空=不限制） |
-   | `DATABASE_PATH` | SQLite 文件路径（默认 `jizhang.db`） |
+   | `DATABASE_URL` | PostgreSQL 连接串（如 `postgresql://postgres@host:5432/db`） |
    | `TZ` | 时区（默认 `Asia/Shanghai`） |
 
-3. **持久化数据库**（可选但推荐）：在 Railway 为该服务挂载一个 Volume，  
-   挂载点设为 `/data`，然后设置 `DATABASE_PATH=/data/jizhang.db`。
+3. 在 Railway 中为项目绑定 PostgreSQL 服务，并确保 `DATABASE_URL` 已注入。
 
 4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 worker。
 
@@ -100,7 +99,7 @@ python bot.py
 jizhang/
 ├── bot.py           # 主程序：Bot 实例、命令、消息处理、定时任务
 ├── config.py        # 从环境变量读取配置
-├── db.py            # 异步 SQLite 数据库层（aiosqlite）
+├── db.py            # 异步 PostgreSQL 数据库层（asyncpg）
 ├── parser.py        # 金额提取与噪声过滤
 ├── requirements.txt
 ├── Procfile         # Railway worker 进程定义

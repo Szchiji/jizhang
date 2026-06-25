@@ -1,12 +1,11 @@
-"""Async SQLite database layer using aiosqlite."""
+"""Async PostgreSQL database layer using asyncpg."""
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import datetime, date
 from typing import Optional
 
-import aiosqlite
+import asyncpg
 
 import config
 
@@ -15,14 +14,9 @@ logger = logging.getLogger(__name__)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _now_iso() -> str:
-    """Current time as ISO-8601 string in the configured timezone."""
-    return datetime.now(config.TZ).isoformat()
-
-
-def _local_date() -> str:
-    """Current local date as YYYY-MM-DD."""
-    return datetime.now(config.TZ).strftime("%Y-%m-%d")
+def _local_date() -> date:
+    """Current local date."""
+    return datetime.now(config.TZ).date()
 
 
 # ── Initialisation ─────────────────────────────────────────────────────────────
@@ -30,34 +24,36 @@ def _local_date() -> str:
 
 async def init_db() -> None:
     """Create tables and indexes if they do not already exist."""
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        await db.execute("""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS entries (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                forward_uid INTEGER,
+                id           BIGSERIAL PRIMARY KEY,
+                forward_uid  BIGINT,
                 forward_name TEXT,
-                amount      REAL    NOT NULL,
-                chat_id     INTEGER NOT NULL,
-                message_id  INTEGER NOT NULL,
-                source_hash TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL,
-                date_local  TEXT    NOT NULL
+                amount       NUMERIC(18,2) NOT NULL,
+                chat_id      BIGINT NOT NULL,
+                message_id   BIGINT NOT NULL,
+                source_hash  TEXT NOT NULL,
+                created_at   TIMESTAMPTZ NOT NULL,
+                date_local   DATE NOT NULL
             )
         """)
-        await db.execute("""
+        await conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source
             ON entries (source_hash)
         """)
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS aliases (
                 keyword    TEXT    PRIMARY KEY,
-                user_id    INTEGER NOT NULL,
-                created_by INTEGER NOT NULL,
-                created_at TEXT    NOT NULL
+                user_id    BIGINT NOT NULL,
+                created_by BIGINT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
             )
         """)
-        await db.commit()
-    logger.info("Database ready at %s", config.DATABASE_PATH)
+    finally:
+        await conn.close()
+    logger.info("Database ready at %s", config.DATABASE_URL)
 
 
 # ── Entry operations ───────────────────────────────────────────────────────────
@@ -78,26 +74,26 @@ async def insert_entry(
     *source_hash* already exists (duplicate forward).
     """
     try:
-        async with aiosqlite.connect(config.DATABASE_PATH) as db:
-            await db.execute(
+        conn = await asyncpg.connect(config.DATABASE_URL)
+        try:
+            await conn.execute(
                 """INSERT INTO entries
                    (forward_uid, forward_name, amount, chat_id, message_id,
                     source_hash, created_at, date_local)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    forward_uid,
-                    forward_name,
-                    amount,
-                    chat_id,
-                    message_id,
-                    source_hash,
-                    _now_iso(),
-                    _local_date(),
-                ),
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                forward_uid,
+                forward_name,
+                amount,
+                chat_id,
+                message_id,
+                source_hash,
+                datetime.now(config.TZ),
+                _local_date(),
             )
-            await db.commit()
+        finally:
+            await conn.close()
         return True
-    except aiosqlite.IntegrityError:
+    except asyncpg.UniqueViolationError:
         return False
 
 
@@ -106,36 +102,47 @@ async def insert_entry(
 
 async def set_alias(keyword: str, user_id: int, created_by: int) -> None:
     """Upsert a keyword → user_id mapping."""
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        await db.execute(
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
             """INSERT INTO aliases (keyword, user_id, created_by, created_at)
-               VALUES (?, ?, ?, ?)
+               VALUES ($1, $2, $3, $4)
                ON CONFLICT(keyword) DO UPDATE
-               SET user_id    = excluded.user_id,
-                   created_by = excluded.created_by,
-                   created_at = excluded.created_at""",
-            (keyword, user_id, created_by, _now_iso()),
+               SET user_id = EXCLUDED.user_id,
+                   created_by = EXCLUDED.created_by,
+                   created_at = EXCLUDED.created_at""",
+            keyword,
+            user_id,
+            created_by,
+            datetime.now(config.TZ),
         )
-        await db.commit()
+    finally:
+        await conn.close()
 
 
 async def get_alias(keyword: str) -> Optional[int]:
     """Return the user_id bound to *keyword*, or ``None``."""
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT user_id FROM aliases WHERE keyword = ?", (keyword,)
-        ) as cur:
-            row = await cur.fetchone()
-    return row[0] if row else None
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM aliases WHERE keyword = $1",
+            keyword,
+        )
+    finally:
+        await conn.close()
+    return row["user_id"] if row else None
 
 
 async def list_aliases() -> list[tuple[str, int]]:
     """Return all (keyword, user_id) pairs sorted by keyword."""
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute(
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        rows = await conn.fetch(
             "SELECT keyword, user_id FROM aliases ORDER BY keyword"
-        ) as cur:
-            return await cur.fetchall()
+        )
+    finally:
+        await conn.close()
+    return [(row["keyword"], row["user_id"]) for row in rows]
 
 
 # ── Statistics ─────────────────────────────────────────────────────────────────
@@ -143,45 +150,55 @@ async def list_aliases() -> list[tuple[str, int]]:
 
 async def get_daily_stats(target_date: date) -> dict:
     """Return bookkeeping statistics for *target_date* (local date)."""
-    date_str = target_date.strftime("%Y-%m-%d")
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM entries WHERE date_local = ?",
-            (date_str,),
-        ) as cur:
-            count, total = await cur.fetchone()
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM entries WHERE date_local = $1",
+            target_date,
+        )
+        count, total = row[0], float(row[1])
 
-        async with db.execute(
-            """SELECT COALESCE(forward_name, '未知'), SUM(amount), COUNT(*)
+        persons_rows = await conn.fetch(
+            """SELECT COALESCE(forward_name, '未知') AS name, SUM(amount) AS total, COUNT(*) AS cnt
                FROM entries
-               WHERE date_local = ?
+               WHERE date_local = $1
                GROUP BY forward_uid, forward_name
                ORDER BY SUM(amount) DESC""",
-            (date_str,),
-        ) as cur:
-            persons = await cur.fetchall()
+            target_date,
+        )
+    finally:
+        await conn.close()
 
+    persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
     return {"count": count, "total": total, "persons": persons}
 
 
 async def get_monthly_stats(year: int, month: int) -> dict:
     """Return bookkeeping statistics for the given year/month."""
-    prefix = f"{year:04d}-{month:02d}"
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM entries WHERE date_local LIKE ?",
-            (f"{prefix}%",),
-        ) as cur:
-            count, total = await cur.fetchone()
-
-        async with db.execute(
-            """SELECT COALESCE(forward_name, '未知'), SUM(amount), COUNT(*)
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
                FROM entries
-               WHERE date_local LIKE ?
+               WHERE EXTRACT(YEAR FROM date_local) = $1
+                 AND EXTRACT(MONTH FROM date_local) = $2""",
+            year,
+            month,
+        )
+        count, total = row[0], float(row[1])
+
+        persons_rows = await conn.fetch(
+            """SELECT COALESCE(forward_name, '未知') AS name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE EXTRACT(YEAR FROM date_local) = $1
+                 AND EXTRACT(MONTH FROM date_local) = $2
                GROUP BY forward_uid, forward_name
                ORDER BY SUM(amount) DESC""",
-            (f"{prefix}%",),
-        ) as cur:
-            persons = await cur.fetchall()
+            year,
+            month,
+        )
+    finally:
+        await conn.close()
 
+    persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
     return {"count": count, "total": total, "persons": persons}
