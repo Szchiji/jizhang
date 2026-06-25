@@ -34,6 +34,7 @@ from db import (
     clear_entries_by_forward_uid,
     get_daily_stats_for_user,
     get_alias,
+    get_alias_keyword_for_user,
     get_daily_stats,
     get_running_total_for_source,
     get_monthly_stats,
@@ -628,14 +629,6 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     src_hash = _source_hash(message)
     fwd_uid, fwd_name = _forward_identity(message)
-    project_name = extract_project_name(text)
-    if not project_name:
-        project_name = await resolve_project_by_text(
-            text,
-            owner_user_id=None if is_admin else current_uid,
-        )
-    if not project_name:
-        project_name = config.DEFAULT_PROJECT_NAME
 
     # Alias look-up: if we have a name but no UID, try the alias table
     if not is_admin and current_uid:
@@ -643,6 +636,15 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         fwd_name = current_user.full_name or current_user.username or str(current_uid)
     elif fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name, owner_user_id=None if is_admin else current_uid)
+
+    project_owner_user_id = fwd_uid if fwd_uid is not None else (None if is_admin else current_uid)
+    project_name = extract_project_name(text)
+    if not project_name:
+        project_name = await resolve_project_by_text(text, owner_user_id=project_owner_user_id)
+    if not project_name and fwd_uid is not None:
+        project_name = await get_alias_keyword_for_user(fwd_uid, owner_user_id=fwd_uid)
+    if not project_name:
+        project_name = config.DEFAULT_PROJECT_NAME
 
     if len(amounts) > 1 and any(op in text for op in ("+", "＋", "-", "－", "减")):
         total_amount = round(sum(amounts), 2)

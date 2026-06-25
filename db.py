@@ -297,6 +297,38 @@ async def get_alias(keyword: str, owner_user_id: Optional[int] = None) -> Option
     return row["user_id"] if row else None
 
 
+async def get_alias_keyword_for_user(
+    user_id: int, owner_user_id: Optional[int] = None
+) -> Optional[str]:
+    """Return one keyword bound to *user_id*, preferring the current owner's scope."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        if owner_user_id is None:
+            row = await conn.fetchrow(
+                """SELECT keyword
+                   FROM aliases
+                   WHERE user_id = $1
+                     AND owner_user_id = 0
+                   ORDER BY LENGTH(keyword) DESC, created_at DESC
+                   LIMIT 1""",
+                user_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                """SELECT keyword
+                   FROM aliases
+                   WHERE user_id = $1
+                     AND owner_user_id IN (0, $2)
+                   ORDER BY (owner_user_id = $2) DESC, LENGTH(keyword) DESC, created_at DESC
+                   LIMIT 1""",
+                user_id,
+                owner_user_id,
+            )
+    finally:
+        await conn.close()
+    return row["keyword"] if row else None
+
+
 async def list_aliases(owner_user_id: Optional[int] = None) -> list[tuple[str, int]]:
     """Return all (keyword, user_id) pairs sorted by keyword."""
     conn = await asyncpg.connect(config.DATABASE_URL)
