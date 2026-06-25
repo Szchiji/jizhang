@@ -34,6 +34,7 @@ from db import (
     get_daily_stats_for_user,
     get_alias,
     get_daily_stats,
+    get_running_total_for_source,
     get_monthly_stats,
     get_monthly_stats_for_user,
     init_db,
@@ -159,6 +160,10 @@ def _clear_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
         "flow_user_id",
     ):
         context.user_data.pop(key, None)
+
+
+def _fmt_signed_amount(amount: float) -> str:
+    return f"-¥{abs(amount):,.2f}" if amount < 0 else f"¥{amount:,.2f}"
 
 
 # ── Forward-message helpers ────────────────────────────────────────────────────
@@ -510,9 +515,9 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name)
 
-    if len(amounts) > 1 and ("+" in text or "＋" in text):
+    if len(amounts) > 1 and any(op in text for op in ("+", "＋", "-", "－", "减")):
         total_amount = round(sum(amounts), 2)
-        note = " + ".join(f"{amt:,.2f}" for amt in amounts)
+        note = " ".join(_fmt_signed_amount(amt) for amt in amounts)
         await _do_record(
             message,
             fwd_uid,
@@ -520,7 +525,7 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             total_amount,
             src_hash,
             project_name=project_name,
-            amount_note=f"（相加：{note}）",
+            amount_note=f"（运算：{note}）",
         )
         return
 
@@ -739,8 +744,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
     who = pending["fwd_name"] or (str(pending["fwd_uid"]) if pending["fwd_uid"] else "未知")
     if inserted:
+        running_total = await get_running_total_for_source(
+            forward_uid=pending["fwd_uid"],
+            forward_name=pending["fwd_name"],
+        )
         await query.edit_message_text(
-            f"✅ 已记账\n👤 来源：{who}\n📁 项目：{pending['project_name']}\n💰 金额：¥{amount:,.2f}"
+            f"✅ 已记账\n👤 来源：{who}\n📁 项目：{pending['project_name']}\n💰 金额：{_fmt_signed_amount(amount)}\n🧾 当前累计：{_fmt_signed_amount(running_total)}"
         )
     else:
         await query.edit_message_text("⚠️ 该消息已记录过，跳过重复入账")
@@ -769,9 +778,14 @@ async def _do_record(
     )
     who = fwd_name or (str(fwd_uid) if fwd_uid else "未知")
     if inserted:
-        amount_line = f"💰 金额：¥{amount:,.2f}"
+        running_total = await get_running_total_for_source(
+            forward_uid=fwd_uid,
+            forward_name=fwd_name,
+        )
+        amount_line = f"💰 金额：{_fmt_signed_amount(amount)}"
         if amount_note:
             amount_line += f"\n🧮 {amount_note}"
+        amount_line += f"\n🧾 当前累计：{_fmt_signed_amount(running_total)}"
         await message.reply_text(
             f"✅ 已记账\n👤 来源：{who}\n📁 项目：{project_name}\n{amount_line}"
         )
