@@ -102,7 +102,10 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
                     InlineKeyboardButton("📋 查看可用用户列表", callback_data="menu:allowlist"),
                 ],
                 [
+                    InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
                     InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
+                ],
+                [
                     InlineKeyboardButton("📊 按用户统计", callback_data="menu:statsuser"),
                 ],
                 [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
@@ -110,7 +113,10 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
         )
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📊 本月统计", callback_data="menu:stats")],
+            [
+                InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
+                InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
+            ],
             [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
         ]
     )
@@ -552,6 +558,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             stats = await get_monthly_stats(now.year, now.month)
             await query.edit_message_text(
                 _fmt_monthly(now.year, now.month, stats),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(is_admin),
+            )
+            return
+
+        if action == "todaystats":
+            _clear_flow(context)
+            now = datetime.now(config.TZ)
+            stats = await get_daily_stats(now.date())
+            await query.edit_message_text(
+                _fmt_daily(now.date(), stats),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_main_menu_keyboard(is_admin),
             )
