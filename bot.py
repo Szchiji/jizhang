@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import asyncio
 import time
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
@@ -869,6 +870,7 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     retry_seconds = 30
     while True:
+        asyncio.set_event_loop(asyncio.new_event_loop())
         app = (
             Application.builder()
             .token(config.BOT_TOKEN)
