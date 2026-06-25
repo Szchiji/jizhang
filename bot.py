@@ -10,12 +10,14 @@ import logging
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
+import asyncpg
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
     Update,
 )
+from telegram.error import Conflict
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -401,6 +403,31 @@ async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _post_init(application: Application) -> None:
     await init_db()
+    lock_conn = await asyncpg.connect(config.DATABASE_URL)
+    locked = await lock_conn.fetchval(
+        "SELECT pg_try_advisory_lock($1)",
+        config.POLLING_LOCK_ID,
+    )
+    if not locked:
+        await lock_conn.close()
+        raise RuntimeError(
+            "another bot instance already holds the polling lock; "
+            "stop duplicate replicas or set a different POLLING_LOCK_ID"
+        )
+    application.bot_data["_polling_lock_conn"] = lock_conn
+    logger.info("Acquired polling lock %s", config.POLLING_LOCK_ID)
+
+
+async def _post_shutdown(application: Application) -> None:
+    lock_conn = application.bot_data.pop("_polling_lock_conn", None)
+    if lock_conn:
+        try:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1)",
+                config.POLLING_LOCK_ID,
+            )
+        finally:
+            await lock_conn.close()
 
 
 def main() -> None:
@@ -408,6 +435,7 @@ def main() -> None:
         Application.builder()
         .token(config.BOT_TOKEN)
         .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
         .build()
     )
 
@@ -433,7 +461,12 @@ def main() -> None:
     app.job_queue.run_daily(_job_daily, time=midnight)
 
     logger.info("Bot starting (polling)…")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except Conflict:
+        logger.exception(
+            "Telegram polling conflict: only one bot instance can call getUpdates."
+        )
 
 
 if __name__ == "__main__":

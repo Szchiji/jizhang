@@ -47,3 +47,7 @@ DATABASE_URL: str = _resolve_database_url()
 
 # ── Timezone ───────────────────────────────────────────────────────────────────
 TZ: ZoneInfo = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
+
+# ── Polling singleton lock ──────────────────────────────────────────────────────
+# Prevent multiple bot replicas from polling Telegram updates at the same time.
+POLLING_LOCK_ID: int = int(os.environ.get("POLLING_LOCK_ID", "20260625"))

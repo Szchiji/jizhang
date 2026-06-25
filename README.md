@@ -50,10 +50,12 @@ python bot.py
    | `ALLOWED_CHAT_IDS` | 允许使用的群组 ID 白名单（空=不限制） |
    | `DATABASE_URL` | PostgreSQL 连接串（如 `postgresql://postgres@host:5432/db`，也会自动识别 `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL`） |
    | `TZ` | 时区（默认 `Asia/Shanghai`） |
+   | `POLLING_LOCK_ID` | 轮询单实例锁 ID（默认 `20260625`，多副本需保持一致） |
 
 3. 在 Railway 中为项目绑定 PostgreSQL 服务，并确保 `DATABASE_URL` 已注入。
 
-4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 worker。
+4. Railway 会自动检测 `Procfile` 并以 `python bot.py` 启动 worker。  
+   若误开了多个副本，机器人会通过 PostgreSQL advisory lock 只允许一个实例进入轮询。
 
 ---
 
