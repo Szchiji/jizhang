@@ -80,40 +80,46 @@ def _is_allowed(update: Update) -> bool:
 def _source_hash(message: Message) -> str:
     """Build a deduplication hash from the message's forwarding metadata."""
     parts: list[str] = []
+    payload = (message.text or message.caption or "").strip()
+    payload_hash = hashlib.sha256(payload.encode()).hexdigest() if payload else ""
 
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
         parts.append(type(origin).__name__)
         sender = getattr(origin, "sender_user", None)
         if sender:
-            parts += [str(sender.id), str(int(origin.date.timestamp()))]
+            parts += [str(sender.id), str(int(origin.date.timestamp())), payload_hash]
         else:
             name = getattr(origin, "sender_user_name", None)
             chat = getattr(origin, "chat", None)
             if name:
-                parts += [name, str(int(origin.date.timestamp()))]
+                parts += [name, str(int(origin.date.timestamp())), payload_hash]
             elif chat:
                 parts.append(str(chat.id))
                 mid = getattr(origin, "message_id", None)
                 if mid:
                     parts.append(str(mid))
+                parts.append(payload_hash)
     elif getattr(message, "forward_from", None):
         parts += [
             "User",
             str(message.forward_from.id),
             str(int(message.forward_date.timestamp())),
+            payload_hash,
         ]
     elif getattr(message, "forward_from_chat", None):
         parts += [
             "Chat",
             str(message.forward_from_chat.id),
             str(message.forward_from_message_id or 0),
+            payload_hash,
         ]
     elif getattr(message, "forward_sender_name", None):
         parts += [
             "Hidden",
             message.forward_sender_name,
             str(int(message.forward_date.timestamp())),
+            payload_hash,
         ]
     else:
         # Fallback: use receiving context (no dedup guarantee)
@@ -250,6 +256,19 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name)
 
+    if len(amounts) > 1 and ("+" in text or "＋" in text):
+        total_amount = round(sum(amounts), 2)
+        note = " + ".join(f"{amt:,.2f}" for amt in amounts)
+        await _do_record(
+            message,
+            fwd_uid,
+            fwd_name,
+            total_amount,
+            src_hash,
+            amount_note=f"（相加：{note}）",
+        )
+        return
+
     if len(amounts) == 1:
         await _do_record(message, fwd_uid, fwd_name, amounts[0], src_hash)
     else:
@@ -323,6 +342,7 @@ async def _do_record(
     fwd_name: Optional[str],
     amount: float,
     src_hash: str,
+    amount_note: Optional[str] = None,
 ) -> None:
     inserted = await insert_entry(
         forward_uid=fwd_uid,
@@ -334,8 +354,11 @@ async def _do_record(
     )
     who = fwd_name or (str(fwd_uid) if fwd_uid else "未知")
     if inserted:
+        amount_line = f"💰 金额：¥{amount:,.2f}"
+        if amount_note:
+            amount_line += f"\n🧮 {amount_note}"
         await message.reply_text(
-            f"✅ 已记账\n👤 来源：{who}\n💰 金额：¥{amount:,.2f}"
+            f"✅ 已记账\n👤 来源：{who}\n{amount_line}"
         )
     else:
         await message.reply_text("⚠️ 该消息已记录过，跳过重复入账")
