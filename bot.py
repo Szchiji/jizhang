@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import html
-from datetime import datetime, timedelta, time as dt_time
+from datetime import date, datetime, timedelta, time as dt_time
 from typing import Optional
 
 from telegram import (
@@ -32,10 +32,13 @@ import config
 from db import (
     clear_entries_by_forward_uid_and_project,
     clear_entries_by_forward_uid,
+    list_allowed_chats,
     get_daily_stats_for_user,
     get_alias,
     get_alias_keyword_for_user,
     get_daily_stats,
+    get_range_stats,
+    get_range_stats_for_user,
     get_running_total_for_source,
     get_monthly_stats,
     get_monthly_stats_for_user,
@@ -46,10 +49,12 @@ from db import (
     list_project_aliases,
     remove_alias,
     remove_allowed_user,
+    remove_allowed_chat,
     remove_project_alias,
     resolve_project_by_text,
     set_alias,
     set_project_alias,
+    upsert_allowed_chat,
     upsert_allowed_user,
 )
 from parser import extract_amounts, extract_project_name
@@ -60,6 +65,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
+runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -72,16 +78,60 @@ def _is_allowed(update: Update) -> bool:
     """Return True when the user/chat is permitted to use the bot."""
     uid = update.effective_user.id if update.effective_user else None
     cid = update.effective_chat.id if update.effective_chat else None
+    ctype = update.effective_chat.type if update.effective_chat else None
 
     if uid and _is_admin(uid):
         return True
 
+    if ctype in {"group", "supergroup"}:
+        if cid in runtime_allowed_chat_ids:
+            return True
+        if uid in runtime_allowed_user_ids:
+            return True
+        return False
+
     if runtime_allowed_user_ids and uid not in runtime_allowed_user_ids:
         return False
-    if config.ALLOWED_CHAT_IDS and cid not in config.ALLOWED_CHAT_IDS:
+    if runtime_allowed_chat_ids and cid not in runtime_allowed_chat_ids:
         return False
 
     return True
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_member_update = update.my_chat_member
+    if not chat_member_update:
+        return
+
+    chat = chat_member_update.chat
+    if chat.type not in {"group", "supergroup"}:
+        return
+
+    chat_id = chat.id
+    actor_id = update.effective_user.id if update.effective_user else 0
+    new_status = getattr(chat_member_update.new_chat_member, "status", "")
+    old_status = getattr(chat_member_update.old_chat_member, "status", "")
+
+    active_statuses = {"member", "administrator"}
+    removed_statuses = {"left", "kicked"}
+
+    if new_status in active_statuses and old_status != new_status:
+        if _is_admin(actor_id) or actor_id in runtime_allowed_user_ids:
+            await upsert_allowed_chat(chat_id, actor_id)
+            runtime_allowed_chat_ids.add(chat_id)
+            logger.info("Allowed group chat %s by user %s", chat_id, actor_id)
+        else:
+            logger.info(
+                "Ignored group chat %s add by unauthorized user %s",
+                chat_id,
+                actor_id,
+            )
+        return
+
+    if new_status in removed_statuses and chat_id in runtime_allowed_chat_ids:
+        await remove_allowed_chat(chat_id)
+        runtime_allowed_chat_ids.discard(chat_id)
+        logger.info("Removed allowed group chat %s after bot left", chat_id)
 
 
 def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
@@ -109,7 +159,11 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
                 ],
                 [
                     InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
+                    InlineKeyboardButton("📊 本周统计", callback_data="menu:weekstats"),
+                ],
+                [
                     InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
+                    InlineKeyboardButton("🔎 日期查账", callback_data="menu:datestats"),
                 ],
                 [
                     InlineKeyboardButton("📊 按用户统计", callback_data="menu:statsuser"),
@@ -130,7 +184,11 @@ def _main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🧹 清空我的记账", callback_data="menu:clearself")],
             [
                 InlineKeyboardButton("📊 今日统计", callback_data="menu:todaystats"),
+                InlineKeyboardButton("📊 本周统计", callback_data="menu:weekstats"),
+            ],
+            [
                 InlineKeyboardButton("📊 本月统计", callback_data="menu:stats"),
+                InlineKeyboardButton("🔎 日期查账", callback_data="menu:datestats"),
             ],
             [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:home")],
         ]
@@ -252,6 +310,28 @@ async def _build_project_list_view(
 
 def _fmt_signed_amount(amount: float) -> str:
     return f"-¥{abs(amount):,.2f}" if amount < 0 else f"¥{amount:,.2f}"
+
+
+def _week_bounds(target_date: date) -> tuple[date, date]:
+    start = target_date - timedelta(days=target_date.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def _parse_local_date(raw: str) -> Optional[date]:
+    value = raw.strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    if "年" in value and "月" in value and "日" in value:
+        try:
+            normalized = value.replace("年", "-").replace("月", "-").replace("日", "")
+            return datetime.strptime(normalized, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    return None
 
 
 # ── Forward-message helpers ────────────────────────────────────────────────────
@@ -432,6 +512,7 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         "bindid_user",
         "delalias_keyword",
         "delproject_keyword",
+        "stats_date",
     }:
         _clear_flow(context)
         await update.message.reply_text("❌ 仅管理员可执行该操作")
@@ -607,6 +688,27 @@ async def handle_private_text_input(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    if action == "stats_date":
+        target_date = _parse_local_date(raw)
+        if not target_date:
+            await update.message.reply_text("❌ 日期格式错误，请输入如 2026-06-25")
+            return
+        if is_admin:
+            stats = await get_daily_stats(target_date)
+            text = _fmt_daily(target_date, stats)
+            menu = _main_menu_keyboard(True)
+        else:
+            stats = await get_daily_stats_for_user(target_date, update.effective_user.id)
+            text = _fmt_daily_user(target_date, update.effective_user.id, stats)
+            menu = _main_menu_keyboard(False)
+        _clear_flow(context)
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=menu,
+        )
+        return
+
 
 # ── Forward handler ────────────────────────────────────────────────────────────
 
@@ -739,6 +841,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
+        if action == "weekstats":
+            _clear_flow(context)
+            now = datetime.now(config.TZ).date()
+            start_date, end_date = _week_bounds(now)
+            if is_admin:
+                stats = await get_range_stats(start_date, end_date)
+                text = _fmt_weekly(start_date, end_date, stats)
+            else:
+                stats = await get_range_stats_for_user(start_date, end_date, update.effective_user.id)
+                text = _fmt_weekly_user(start_date, end_date, update.effective_user.id, stats)
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_main_menu_keyboard(is_admin),
+            )
+            return
+
+        if action == "datestats":
+            if not update.effective_chat or update.effective_chat.type != "private":
+                await query.edit_message_text("❌ 日期查账请在私聊中使用")
+                return
+            _clear_flow(context)
+            context.user_data["flow_action"] = "stats_date"
+            await query.edit_message_text(
+                "请输入要查询的日期（如 2026-06-25）",
+                reply_markup=_cancel_flow_keyboard(),
+            )
+            return
+
         if (
             not update.effective_chat
             or update.effective_chat.type != "private"
@@ -753,6 +884,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "bindid",
                     "delalias",
                     "delproject",
+                    "datestats",
                 }
             )
         ):
@@ -1066,6 +1198,45 @@ def _fmt_monthly_user(year: int, month: int, forward_uid: int, stats: dict) -> s
     return "\n".join(lines)
 
 
+def _fmt_weekly(start_date: date, end_date: date, stats: dict) -> str:
+    lines = [
+        f"📊 <b>{start_date} ~ {end_date} 本周入账统计</b>",
+        f"💰 总额：¥{stats['total']:,.2f}",
+        f"📝 笔数：{stats['count']} 笔",
+        "",
+        "👥 分人排行：",
+    ]
+    if stats["persons"]:
+        for i, (name, total, cnt) in enumerate(stats["persons"], 1):
+            lines.append(f"  {i}. {name}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    lines.append("")
+    lines.append("📁 分项目排行：")
+    if stats.get("projects"):
+        for i, (project, total, cnt) in enumerate(stats["projects"], 1):
+            lines.append(f"  {i}. {project}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    return "\n".join(lines)
+
+
+def _fmt_weekly_user(start_date: date, end_date: date, forward_uid: int, stats: dict) -> str:
+    lines = [
+        f"📊 <b>{start_date} ~ {end_date} 用户 {forward_uid} 本周入账统计</b>",
+        f"💰 总额：¥{stats['total']:,.2f}",
+        f"📝 笔数：{stats['count']} 笔",
+        "",
+        "📁 分项目排行：",
+    ]
+    if stats.get("projects"):
+        for i, (project, total, cnt) in enumerate(stats["projects"], 1):
+            lines.append(f"  {i}. {project}：¥{total:,.2f}（{cnt} 笔）")
+    else:
+        lines.append("  （无数据）")
+    return "\n".join(lines)
+
+
 def _fmt_daily_user(d: object, forward_uid: int, stats: dict) -> str:
     lines = [
         f"📊 <b>{d} 用户 {forward_uid} 入账统计</b>",
@@ -1113,10 +1284,12 @@ async def _job_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _post_init(application: Application) -> None:
-    global runtime_allowed_user_ids
+    global runtime_allowed_user_ids, runtime_allowed_chat_ids
     await init_db()
     runtime_allowed_user_ids = set(config.ALLOWED_USER_IDS)
     runtime_allowed_user_ids.update(await list_allowed_users())
+    runtime_allowed_chat_ids = set(config.ALLOWED_CHAT_IDS)
+    runtime_allowed_chat_ids.update(await list_allowed_chats())
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1165,6 +1338,7 @@ def main() -> None:
             handle_private_text_input,
         )
     )
+    app.add_handler(MessageHandler(filters.StatusUpdate.MY_CHAT_MEMBER, handle_my_chat_member))
 
     # Inline-keyboard callbacks
     app.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^(amt|menu):"))

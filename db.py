@@ -143,6 +143,13 @@ async def init_db() -> None:
                 created_at TIMESTAMPTZ NOT NULL
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_chats (
+                chat_id    BIGINT PRIMARY KEY,
+                created_by BIGINT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+        """)
     finally:
         await conn.close()
     logger.info("Database ready at %s", config.DATABASE_URL)
@@ -492,6 +499,49 @@ async def list_allowed_users() -> list[int]:
     return [int(row["user_id"]) for row in rows]
 
 
+async def upsert_allowed_chat(chat_id: int, created_by: int) -> None:
+    """Add/update an allowed group chat."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO allowed_chats (chat_id, created_by, created_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(chat_id) DO UPDATE
+               SET created_by = EXCLUDED.created_by,
+                   created_at = EXCLUDED.created_at""",
+            chat_id,
+            created_by,
+            datetime.now(config.TZ),
+        )
+    finally:
+        await conn.close()
+
+
+async def remove_allowed_chat(chat_id: int) -> bool:
+    """Remove an allowed group chat. Returns True when deleted."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM allowed_chats WHERE chat_id = $1",
+            chat_id,
+        )
+    finally:
+        await conn.close()
+    return int(result.split()[-1]) > 0
+
+
+async def list_allowed_chats() -> list[int]:
+    """Return all allowed group chat IDs sorted ascending."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT chat_id FROM allowed_chats ORDER BY chat_id"
+        )
+    finally:
+        await conn.close()
+    return [int(row["chat_id"]) for row in rows]
+
+
 # ── Statistics ─────────────────────────────────────────────────────────────────
 
 
@@ -628,6 +678,83 @@ async def get_daily_stats_for_user(target_date: date, forward_uid: int) -> dict:
                GROUP BY project_name
                ORDER BY SUM(amount) DESC""",
             target_date,
+            forward_uid,
+        )
+    finally:
+        await conn.close()
+
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "projects": projects}
+
+
+async def get_range_stats(start_date: date, end_date: date) -> dict:
+    """Return bookkeeping statistics for [start_date, end_date] (local date)."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2""",
+            start_date,
+            end_date,
+        )
+        count, total = row[0], float(row[1])
+
+        persons_rows = await conn.fetch(
+            """SELECT COALESCE(forward_name, '未知') AS name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+               GROUP BY forward_uid, forward_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
+        )
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
+        )
+    finally:
+        await conn.close()
+
+    persons = [(row["name"], float(row["total"]), row["cnt"]) for row in persons_rows]
+    projects = [(row["project_name"], float(row["total"]), row["cnt"]) for row in project_rows]
+    return {"count": count, "total": total, "persons": persons, "projects": projects}
+
+
+async def get_range_stats_for_user(start_date: date, end_date: date, forward_uid: int) -> dict:
+    """Return bookkeeping statistics for one user in [start_date, end_date]."""
+    conn = await asyncpg.connect(config.DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0)
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+                 AND forward_uid = $3""",
+            start_date,
+            end_date,
+            forward_uid,
+        )
+        count, total = row[0], float(row[1])
+
+        project_rows = await conn.fetch(
+            """SELECT project_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM entries
+               WHERE date_local >= $1
+                 AND date_local <= $2
+                 AND forward_uid = $3
+               GROUP BY project_name
+               ORDER BY SUM(amount) DESC""",
+            start_date,
+            end_date,
             forward_uid,
         )
     finally:
