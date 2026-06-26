@@ -245,7 +245,7 @@ def _cancel_flow_keyboard() -> InlineKeyboardMarkup:
 def _menu_text(is_admin: bool) -> str:
     base = (
         "👋 <b>记账机器人</b>\n\n"
-        "📌 将消息转发给我即可自动记账。\n"
+        "📌 私聊或群聊直接发金额可自动记账，转发消息也支持。\n"
         "📌 所有功能请使用下方内联按钮操作。"
     )
     if is_admin:
@@ -439,6 +439,15 @@ def _forward_identity(message: Message) -> tuple[Optional[int], Optional[str]]:
         return None, fsn
 
     return None, None
+
+
+def _is_forwarded_message(message: Message) -> bool:
+    return bool(
+        getattr(message, "forward_origin", None)
+        or getattr(message, "forward_from", None)
+        or getattr(message, "forward_from_chat", None)
+        or getattr(message, "forward_sender_name", None)
+    )
 
 
 # ── Command handlers ───────────────────────────────────────────────────────────
@@ -800,12 +809,20 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ 无权限访问")
         return
 
+    if (
+        update.effective_chat
+        and update.effective_chat.type == "private"
+        and context.user_data.get("flow_action")
+    ):
+        return
+
     message = update.message
     text = message.text or message.caption or ""
     amounts = extract_amounts(text)
     current_user = update.effective_user
     current_uid = current_user.id if current_user else None
     is_admin = bool(current_uid and _is_admin(current_uid))
+    is_forwarded = _is_forwarded_message(message)
 
     if not amounts:
         await message.reply_text("⚠️ 未识别到有效金额，请检查消息内容")
@@ -814,14 +831,19 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     src_hash = _source_hash(message)
     fwd_uid, fwd_name = _forward_identity(message)
 
-    # Alias look-up: if we have a name but no UID, try the alias table
-    if not is_admin and current_uid:
+    # Direct bookkeeping always belongs to current sender.
+    if not is_forwarded and current_uid:
         fwd_uid = current_uid
         fwd_name = current_user.full_name or current_user.username or str(current_uid)
+    # Non-admin forwarded bookkeeping is isolated to themselves.
+    elif not is_admin and current_uid:
+        fwd_uid = current_uid
+        fwd_name = current_user.full_name or current_user.username or str(current_uid)
+    # Alias look-up: if we have a name but no UID, try the alias table.
     elif fwd_uid is None and fwd_name:
         fwd_uid = await get_alias(fwd_name, owner_user_id=None if is_admin else current_uid)
 
-    project_owner_user_id = fwd_uid if fwd_uid is not None else (None if is_admin else current_uid)
+    project_owner_user_id = fwd_uid if fwd_uid is not None else current_uid
     project_name = extract_project_name(text)
     if not project_name:
         project_name = await resolve_project_by_text(text, owner_user_id=project_owner_user_id)
@@ -1524,6 +1546,17 @@ def main() -> None:
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
             handle_private_text_input,
         )
+    )
+    # Direct bookkeeping in private/group chats (text or caption)
+    app.add_handler(
+        MessageHandler(
+            (filters.ChatType.PRIVATE | filters.ChatType.GROUPS)
+            & (filters.TEXT | filters.CAPTION)
+            & ~filters.COMMAND
+            & ~filters.FORWARDED,
+            handle_forward,
+        ),
+        group=1,
     )
     app.add_handler(ChatMemberHandler(handle_my_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER))
 
