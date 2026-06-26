@@ -9,6 +9,7 @@ import logging
 import hashlib
 import html
 import calendar
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -73,6 +74,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
 runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
+_STANDALONE_AMOUNT_RE = re.compile(
+    r"^\s*(?:[¥￥$€£]\s*)?(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+)\s*$"
+)
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -106,6 +110,15 @@ def _is_allowed(update: Update) -> bool:
         return False
 
     return True
+
+
+def _is_standalone_amount_message(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(op in stripped for op in ("+", "＋", "-", "－", "减", "加")):
+        return False
+    return bool(_STANDALONE_AMOUNT_RE.fullmatch(stripped))
 
 
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -818,11 +831,14 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     message = update.message
     text = message.text or message.caption or ""
-    amounts = extract_amounts(text)
     current_user = update.effective_user
     current_uid = current_user.id if current_user else None
     is_admin = bool(current_uid and _is_admin(current_uid))
     is_forwarded = _is_forwarded_message(message)
+    if not is_forwarded and _is_standalone_amount_message(text):
+        await message.reply_text("⚠️ 单独发送数字不入账，请使用加减等符号后再发送")
+        return
+    amounts = extract_amounts(text)
 
     if not amounts:
         await message.reply_text("⚠️ 未识别到有效金额，请检查消息内容")
