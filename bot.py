@@ -836,7 +836,6 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     is_admin = bool(current_uid and _is_admin(current_uid))
     is_forwarded = _is_forwarded_message(message)
     if not is_forwarded and _is_standalone_amount_message(text):
-        await message.reply_text("⚠️ 单独发送数字不入账，请使用加减等符号后再发送")
         return
     amounts = extract_amounts(text)
 
