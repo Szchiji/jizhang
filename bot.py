@@ -1456,7 +1456,6 @@ async def _job_custom_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Dispatch custom report schedules for admins/allowed users."""
     now = datetime.now(config.TZ)
     today = now.date()
-    current_time = now.strftime("%H:%M")
     month_key = f"{now.year:04d}-{now.month:02d}"
     month_last_day = calendar.monthrange(now.year, now.month)[1]
 
@@ -1469,8 +1468,9 @@ async def _job_custom_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
     global_monthly: Optional[dict] = None
     for user_id, schedule in schedules.items():
         try:
+            daily_h, daily_m = map(int, schedule["daily_time"].split(":"))
             if (
-                schedule["daily_time"] == current_time
+                (now.hour, now.minute) >= (daily_h, daily_m)
                 and schedule.get("daily_last_sent") != today
             ):
                 if _is_admin(user_id):
@@ -1487,10 +1487,11 @@ async def _job_custom_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 await mark_report_daily_sent(user_id, today)
 
+            monthly_h, monthly_m = map(int, schedule["monthly_time"].split(":"))
             target_day = min(schedule["monthly_day"], month_last_day)
             if (
-                schedule["monthly_time"] == current_time
-                and now.day == target_day
+                now.day == target_day
+                and (now.hour, now.minute) >= (monthly_h, monthly_m)
                 and schedule.get("monthly_last_sent") != month_key
             ):
                 if _is_admin(user_id):
