@@ -217,18 +217,29 @@ async def get_running_total_for_source(
     forward_uid: Optional[int],
     forward_name: Optional[str],
 ) -> float:
-    """Return cumulative amount for a source user/name."""
+    """Return current-month cumulative amount for a source user/name."""
+    month_start = _local_date().replace(day=1)
     conn = await asyncpg.connect(config.DATABASE_URL)
     try:
         if forward_uid is not None:
             total = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount), 0) FROM entries WHERE forward_uid = $1",
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM entries
+                WHERE forward_uid = $1 AND date_local >= $2
+                """,
                 forward_uid,
+                month_start,
             )
         elif forward_name:
             total = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount), 0) FROM entries WHERE forward_name = $1",
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM entries
+                WHERE forward_name = $1 AND date_local >= $2
+                """,
                 forward_name,
+                month_start,
             )
         else:
             total = 0
