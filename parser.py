@@ -72,9 +72,9 @@ def extract_amounts(text: str) -> list[int]:
         i = m.start() - 1
         while i >= 0 and text[i].isspace():
             i -= 1
-        if i >= 0 and text[i] in {"-", "－", "−", "﹣", "—", "–", "减"}:
+        if i >= 0 and text[i] in {"-", "－", "−", "﹣", "—", "–", "减", "➖"}:
             sign = -1
-        elif i >= 0 and text[i] in {"+", "＋", "加"}:
+        elif i >= 0 and text[i] in {"+", "＋", "加", "➕"}:
             sign = 1
 
         if 1 <= value <= 999_999:

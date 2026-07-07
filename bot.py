@@ -77,7 +77,7 @@ runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
 _STANDALONE_AMOUNT_RE = re.compile(
     r"^\s*(?:[¥￥$€£]\s*)?(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+)\s*$"
 )
-_AMOUNT_OPERATOR_TOKENS = ("+", "＋", "-", "－", "减", "加")
+_AMOUNT_OPERATOR_TOKENS = ("+", "＋", "➕", "-", "－", "➖", "减", "加")
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
