@@ -20,13 +20,11 @@ _EXCLUDE: list[re.Pattern[str]] = [
     re.compile(r"(?<!\d)\d{3,4}-\d{4}(?!\d)"),                   # phone xxx-xxxx
 ]
 
-# Pattern that captures a candidate amount (with optional currency prefix).
-# Uses (?<!\d)/(?!\d) so it matches digits embedded in Chinese text.
+# Pattern that captures a candidate integer amount (with optional currency prefix).
 _AMOUNT_RE = re.compile(
-    r"[¥￥$€£]\s*\d{1,3}(?:[,，]\d{3})*(?:\.\d{1,2})?"          # currency-prefixed
-    r"|(?<!\d)\d{1,3}(?:[,，]\d{3})+(?:\.\d{1,2})?(?!\d)"       # thousands-grouped
-    r"|(?<!\d)\d+\.\d{1,2}(?!\d)"                                # decimal N.NN
-    r"|(?<!\d)\d+(?!\d)"                                         # plain integer
+    r"[¥￥$€£]\s*(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?![\d.])"        # currency-prefixed integer
+    r"|(?<![\d.])\d{1,3}(?:[,，]\d{3})+(?![\d.])"                # thousands-grouped integer
+    r"|(?<![\d.])\d+(?![\d.])"                                   # plain integer
 )
 
 _PROJECT_TAG_RE = re.compile(
@@ -40,12 +38,12 @@ _PROJECT_PREFIX_RE = re.compile(
 )
 
 
-def extract_amounts(text: str) -> list[float]:
+def extract_amounts(text: str) -> list[int]:
     """Return candidate amounts from *text* in order of appearance.
 
     Numbers that overlap with date, time, phone or other non-monetary patterns
     are silently discarded. Leading signs/operators (e.g. ``-20``/``减20``) are
-    respected. Absolute values must remain in the range [0.01, 999 999].
+    respected. Absolute values must remain in the range [1, 999 999].
     """
     if not text:
         return []
@@ -56,7 +54,7 @@ def extract_amounts(text: str) -> list[float]:
         for m in pat.finditer(text):
             excluded.update(range(m.start(), m.end()))
 
-    amounts: list[float] = []
+    amounts: list[int] = []
 
     for m in _AMOUNT_RE.finditer(text):
         # Reject if the match sits inside an excluded zone
@@ -66,21 +64,21 @@ def extract_amounts(text: str) -> list[float]:
         # Strip currency symbols and digit-group separators, then parse
         raw = re.sub(r"[¥￥$€£\s,，]", "", m.group())
         try:
-            value = float(raw)
+            value = int(raw)
         except ValueError:
             continue
 
-        sign = 1.0
+        sign = 1
         i = m.start() - 1
         while i >= 0 and text[i].isspace():
             i -= 1
         if i >= 0 and text[i] in {"-", "－", "−", "﹣", "—", "–", "减"}:
-            sign = -1.0
+            sign = -1
         elif i >= 0 and text[i] in {"+", "＋", "加"}:
-            sign = 1.0
+            sign = 1
 
-        if 0.01 <= value <= 999_999:
-            amounts.append(round(value * sign, 2))
+        if 1 <= value <= 999_999:
+            amounts.append(value * sign)
 
     return amounts
 
