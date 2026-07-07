@@ -77,6 +77,7 @@ runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
 _STANDALONE_AMOUNT_RE = re.compile(
     r"^\s*(?:[¥￥$€£]\s*)?(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+)\s*$"
 )
+_AMOUNT_OPERATOR_TOKENS = ("+", "＋", "-", "－", "减", "加")
 
 # ── Access helpers ─────────────────────────────────────────────────────────────
 
@@ -116,9 +117,13 @@ def _is_standalone_amount_message(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    if any(op in stripped for op in ("+", "＋", "-", "－", "减", "加")):
+    if any(op in stripped for op in _AMOUNT_OPERATOR_TOKENS):
         return False
     return bool(_STANDALONE_AMOUNT_RE.fullmatch(stripped))
+
+
+def _has_amount_operator(text: str) -> bool:
+    return any(op in text for op in _AMOUNT_OPERATOR_TOKENS)
 
 
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -835,12 +840,15 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     current_uid = current_user.id if current_user else None
     is_admin = bool(current_uid and _is_admin(current_uid))
     is_forwarded = _is_forwarded_message(message)
-    if not is_forwarded and _is_standalone_amount_message(text):
+    if _is_standalone_amount_message(text):
         return
     amounts = extract_amounts(text)
 
     if not amounts:
         await message.reply_text("⚠️ 未识别到有效金额，请检查消息内容")
+        return
+    if not _has_amount_operator(text):
+        await message.reply_text("⚠️ 仅支持带加减符号的整数记账（如 +100、-20、加30、减10）")
         return
 
     src_hash = _source_hash(message)
