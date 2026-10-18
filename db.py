@@ -1,6 +1,8 @@
 """Async PostgreSQL database layer using asyncpg."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import logging
 from datetime import datetime, date
 from typing import Optional
@@ -166,7 +168,8 @@ async def init_db() -> None:
         """)
     finally:
         await conn.close()
-    logger.info("Database ready at %s", config.DATABASE_URL)
+    _p = urlsplit(config.DATABASE_URL)
+    logger.info("Database ready at %s:%s%s", _p.hostname, _p.port, _p.path)
 
 
 # ── Entry operations ───────────────────────────────────────────────────────────
