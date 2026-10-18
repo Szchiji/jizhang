@@ -72,6 +72,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 runtime_allowed_user_ids: set[int] = set(config.ALLOWED_USER_IDS)
 runtime_allowed_chat_ids: set[int] = set(config.ALLOWED_CHAT_IDS)
 _STANDALONE_AMOUNT_RE = re.compile(
@@ -1544,6 +1546,12 @@ def main() -> None:
     app = (
         Application.builder()
         .token(config.BOT_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(20)
+        .get_updates_connect_timeout(20)
+        .get_updates_read_timeout(30)
         .post_init(_post_init)
         .build()
     )
